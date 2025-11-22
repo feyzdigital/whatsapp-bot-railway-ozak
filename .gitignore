@@ -1,0 +1,21 @@
+# Node ve derleme klasörleri
+node_modules/
+npm-debug.log*
+.DS_Store
+
+# Oturum ve cache
+session/
+.node-persist/
+
+# Ortam değişkenleri / gizli bilgiler
+.env
+.env.*
+*.env
+
+# Ekran görüntüleri
+screenshot_feyz-bot_*.png
+
+# Herhangi bir GCP key dosyası (dosya adını biliyorsan buraya ekle)
+# örn:
+# gcp-key.json
+# service-account.json
