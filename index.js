@@ -1,45 +1,54 @@
 const express = require("express");
 const { create } = require("@open-wa/wa-automate");
-const fs = require("fs");
-const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// QR dosyasını sabit bir path'te tutacağız
-const QR_PATH = path.join(__dirname, "session", "last.qr.png");
+// Son üretilen QR kodunu hafızada tutacağız
+let latestQrBase64 = null;
 
-// 1) Health-check
+// Health-check (Railway ve test için)
 app.get("/", (req, res) => {
   res.send("WhatsApp bot is running on Railway 🚀");
 });
 
-// 2) QR görüntüsü için endpoint
+// QR kodu gösteren endpoint
 app.get("/qr", (req, res) => {
-  fs.access(QR_PATH, fs.constants.F_OK, (err) => {
-    if (err) {
-      return res
-        .status(404)
-        .send("QR henüz hazır değil, birkaç saniye sonra yenileyin. 🔄");
-    }
-    res.sendFile(QR_PATH);
-  });
+  if (!latestQrBase64) {
+    return res.send(`
+      <html>
+        <body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:#111;color:#eee;">
+          <div>
+            <h2>QR henüz hazır değil</h2>
+            <p>Lütfen birkaç saniye sonra sayfayı yenile (F5).</p>
+          </div>
+        </body>
+      </html>
+    `);
+  }
+
+  res.send(`
+    <html>
+      <body style="display:flex;align-items:center;justify-content:center;height:100vh;background:#111;">
+        <img src="data:image/png;base64,${latestQrBase64}"
+             style="width:320px;height:320px;border:8px solid #fff;border-radius:16px;box-shadow:0 0 20px rgba(0,0,0,.7);" />
+      </body>
+    </html>
+  `);
 });
 
-// 3) WhatsApp Bot Ayarları
+// WhatsApp botu oluştur
 create({
   sessionId: "feyz-bot",
-
   multiDevice: true,
-  headless: true,          // Railway'de her zaman headless
+  headless: true,          // Railway'de her zaman true
   authTimeout: 0,
   restartOnCrash: true,
   cacheEnabled: false,
 
-  // Railway içinde kendi Chromium'unu kullansın
+  // Puppeteer’ın kendi Chromium’unu kullanıyoruz
   useChrome: false,
 
-  // Chromium argümanları (Docker için önemli)
   chromiumArgs: [
     "--no-sandbox",
     "--disable-setuid-sandbox",
@@ -53,42 +62,37 @@ create({
 
   killProcessOnBrowserClose: false,
 
-  // Oturum dosyaları
   sessionDataPath: "./session",
 
-  // QR ayarları
-  qrLogSkip: true,     // Konsola ASCII QR basma
+  // QR AYARLARI
+  qrLogSkip: true,   // terminale ascii QR basma
   qrRefreshS: 0,
   qrTimeout: 0,
-  qrOutput: "png",
-  qrScreenshot: true,
 
-  // 🔥 QR kodunu base64 olarak yakalayıp PNG'ye çeviriyoruz
-  qrCallback: async (qrData /* base64 PNG */, asciiQR, attempts, url) => {
+  // QR üretildiğinde tetiklenen callback – base64'i hafızaya alıyoruz
+  qrCallback: (qrBase64 /*, asciiQR, attempts, url */) => {
     try {
-      if (!qrData) return;
-
-      const base64 = qrData.replace(/^data:image\/png;base64,/, "");
-      await fs.promises.mkdir(path.dirname(QR_PATH), { recursive: true });
-      await fs.promises.writeFile(QR_PATH, Buffer.from(base64, "base64"));
-
-      console.log("📷 Yeni QR kaydedildi:", QR_PATH);
+      // Bazı versiyonlarda "data:image/png;base64,..." prefix'i olabiliyor, güvenli tarafta kalalım
+      const clean = qrBase64.replace(/^data:.*;base64,/, "");
+      latestQrBase64 = clean;
+      console.log("📸 Yeni QR kodu alındı ve /qr üzerinden gösteriliyor.");
     } catch (err) {
-      console.error("QR kaydedilirken hata:", err);
+      console.error("QR callback sırasında hata:", err);
     }
   },
 })
   .then((client) => {
-    console.log("✅ WhatsApp bot başlatıldı, client hazır!");
+    console.log("✅ WhatsApp bot başlatıldı, client hazırlanıyor...");
     startBot(client);
   })
   .catch((err) => {
     console.error("❌ Bot başlatılamadı:", err);
   });
 
-// 4) Mesajlara Cevap Veren Bot Fonksiyonu
+// Mesajlara cevap veren basit bot
 function startBot(client) {
   client.onMessage(async (message) => {
+    // Kendi mesajımıza cevap vermeyelim
     if (message.fromMe) return;
 
     const text = (message.body || "").toLowerCase().trim();
@@ -96,18 +100,20 @@ function startBot(client) {
     if (text === "merhaba") {
       return client.sendText(
         message.from,
-        "Merhaba! 👋 Nasıl yardımcı olabilirim?"
+        "Merhaba! 👋 Ben Railway üzerinde çalışan WhatsApp botuyum."
       );
     }
 
-    client.sendText(
+    return client.sendText(
       message.from,
-      "Mesajını aldım 🙌\nBu bir otomatik yanıttır."
+      "Mesajını aldım 🙌\n\n(Not: Bu mesaj otomatik olarak gönderildi.)"
     );
   });
+
+  console.log("🤖 Bot event dinleyicileri ayarlandı.");
 }
 
-// 5) HTTP Server – Railway için zorunlu
+// HTTP server (Railway için zorunlu)
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🌐 Server running on port ${PORT}`);
 });
