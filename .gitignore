@@ -3,7 +3,8 @@ node_modules/
 npm-debug.log*
 .DS_Store
 
-# Cache klasörleri (session hariç!)
+# Oturum ve cache
+session/
 .node-persist/
 
 # Ortam değişkenleri / gizli bilgiler
@@ -11,10 +12,9 @@ npm-debug.log*
 .env.*
 *.env
 
-# Ekran görüntüleri
+# Ekran görüntüleri (QR)
 screenshot_feyz-bot_*.png
 
-# Herhangi bir GCP key dosyası (dosya adını biliyorsan buraya ekle)
-# örn:
+# Herhangi bir GCP key dosyası (ileride kullanırsan buraya ekle)
 # gcp-key.json
 # service-account.json
