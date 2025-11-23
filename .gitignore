@@ -3,8 +3,7 @@ node_modules/
 npm-debug.log*
 .DS_Store
 
-# Oturum ve cache
-session/
+# Cache klasörleri (session hariç!)
 .node-persist/
 
 # Ortam değişkenleri / gizli bilgiler
