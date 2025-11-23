@@ -9,38 +9,34 @@ const OpenAI = require("openai");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ----------------------------------------------------------------------
-// OPENAI CLIENT
-// ----------------------------------------------------------------------
+// OpenAI Client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// ----------------------------------------------------------------------
-// HEALTH CHECK
-// ----------------------------------------------------------------------
+// --- HEALTH CHECK (Railway) ---
 app.get("/", (req, res) => {
   res.send("WhatsApp Textile Assistant bot is running 🚀");
 });
 
-// ----------------------------------------------------------------------
-// WHATSAPP BOT BAŞLAT
-// ----------------------------------------------------------------------
+// --- WHATSAPP CLIENT BAŞLATMA ---
 create({
   sessionId: "feyz-bot",
   multiDevice: true,
-  headless: true, // Railway'de zorunlu
+  headless: true,
   useChrome: false,
   authTimeout: 0,
   restartOnCrash: true,
   cacheEnabled: false,
   killProcessOnBrowserClose: false,
   sessionDataPath: "./session",
-  qrLogSkip: true,
+
+  // QR görüntüleme ayarları
+  qrLogSkip: false,        // QR konsolda görünsün
   qrRefreshS: 0,
   qrTimeout: 0,
-  qrOutput: "png",
-  qrScreenshot: true,
+  qrOutput: "terminal",    // ASCII QR
+  qrScreenshot: false,
 
   chromiumArgs: [
     "--no-sandbox",
@@ -61,121 +57,95 @@ create({
     console.error("❌ Bot başlatılamadı:", err);
   });
 
-// ----------------------------------------------------------------------
-// DİL TESPİTİ
-// ----------------------------------------------------------------------
+// --- DİL TESPİTİ ---
 function detectLanguage(text) {
   const trChars = /[çğıöşüÇĞİÖŞÜ]/;
-  if (trChars.test(text)) return "tr";
-  return "de";
+  return trChars.test(text) ? "tr" : "de";
 }
 
-// ----------------------------------------------------------------------
-// OPENAI MESAJ ÜRETİCİ
-// ----------------------------------------------------------------------
+// --- OPENAI YANIT ÜRETİCİ ---
 async function generateAiReply(userText, lang) {
-  const baseSystemPrompt = `
-You are a **bilingual (Turkish + German)** international sales representative
-for a company that produces ONLY **1st-class premium textile products**.
+  const basePrompt = `
+Sen, Avrupa'nın her yerine 1. sınıf premium tekstil ürünleri tedarik eden kurumsal bir firmanın
+uluslararası müşteri temsilcisisin. Tonun:
+- Profesyonel,
+- Samimi,
+- Çözüm odaklı,
+- WhatsApp sohbetine uygun kısa cümleler.
 
-Your duties:
-- Provide warm, professional and concise WhatsApp replies.
-- Detect customer needs clearly and ask short follow-up questions.
-- NEVER provide prices directly.
-- ALWAYS stay in corporate tone but friendly and natural.
-- NEVER give incorrect product details or promises.
+Müşteriden şu bilgileri nazikçe iste:
+• Hangi ürünle ilgileniyor? (otel tekstili, havlu, nevresim, masa örtüsü vb.)
+• Ölçü / adet / metraj
+• Teslim adresi (ülke-şehir)
+• Hedef fiyat aralığı varsa belirtmesini rica et.
 
-Company facts (must always be consistent):
-- The company manufactures ONLY 1st class textile products.
-- NO second-quality or defective goods are produced.
-- Supplies hotels, restaurants and premium clients across Europe.
-- Strong in consistency, reliability and logistics.
+Fiyat verme. Sadece bilgi topla ve yardımcı ol.
+`;
 
-Ask for:
-- Product type (hotel textile, tablecloth, towel, bedsheet, etc.)
-- Quantities / sizes / material preferences
-- Delivery country & deadline
-- Sample or photos if needed
+  const systemPromptTr = `${basePrompt}
+Cevap dili: Türkçe.
+Hitap şekli: Siz.
+İlk mesajda kendini tanıt: "Ben firmanın uluslararası satış ekibindenim."
+`;
 
-Always avoid sounding like an AI.
-Write like a real professional human sales agent.
-  `;
-
-  const systemPromptTr = `
-${baseSystemPrompt}
-
-Cevap dili: **Türkçe**.
-Her zaman “siz” diye hitap et.
-WhatsApp için doğal, kısa ve samimi ama kurumsal yaz.
-Kendini tanıt: "Ben firmanın uluslararası satış ekibindenim."
-  `;
-
-  const systemPromptDe = `
-${baseSystemPrompt}
-
-Antwortsprache: **Deutsch**.
-Höflich, professionell aber warm.
-Kurze, natürliche WhatsApp-Nachrichten.
-  `;
+  const systemPromptDe = `${basePrompt}
+Antwortsprache: Deutsch.
+Höflich, professionell, aber natürlich und locker.
+`;
 
   const systemPrompt = lang === "tr" ? systemPromptTr : systemPromptDe;
 
-  const input = [
+  const messages = [
     { role: "system", content: systemPrompt },
     { role: "user", content: userText },
   ];
 
   const response = await openai.responses.create({
     model: "gpt-5.1-mini",
-    input,
+    input: messages,
   });
 
   return response.output[0]?.content?.[0]?.text?.trim() || "";
 }
 
-// ----------------------------------------------------------------------
-// MESAJ DİNLEYİCİ
-// ----------------------------------------------------------------------
+// --- MESAJ DİNLİYOR ---
 function startBot(client) {
-  console.log("🤖 startBot aktif – mesajlar dinleniyor...");
+  console.log("🤖 startBot çalıştı — mesajlar dinleniyor...");
 
   client.onMessage(async (message) => {
-    if (message.fromMe) return;
-    if (!message.body) return;
-    if (message.isGroupMsg) return;
+    if (message.fromMe) return;          // kendi mesajımızı geç
+    if (message.isGroupMsg) return;      // grup mesajı yok
 
-    const text = message.body.trim();
-    console.log("📩 Yeni mesaj:", text);
+    const text = (message.body || "").trim();
+    if (!text) return;
+
+    console.log("📩 Yeni mesaj:", {
+      from: message.from,
+      name: message.sender?.pushname,
+      text,
+    });
 
     const lang = detectLanguage(text);
 
     try {
       const reply = await generateAiReply(text, lang);
-
-      if (!reply) throw new Error("Boş cevap");
-
       await client.sendText(message.from, reply);
-      console.log("✅ Yanıt gönderildi");
+
+      console.log("✅ Yanıt gönderildi.");
     } catch (err) {
-      console.error("❌ Yanıt oluşturulamadı:", err);
+      console.error("❌ AI hata:", err);
 
       const fallback =
         lang === "tr"
-          ? "Şu an teknik bir sorun var. Mesajınızı aldım ve ekibe ilettim. En kısa sürede dönüş yapacağız. 🙏"
-          : "Momentan gibt es ein technisches Problem. Ich habe Ihre Nachricht erhalten. Wir melden uns so schnell wie möglich. 🙏";
+          ? "Şu anda geçici bir teknik sorun yaşıyoruz. Mesajınızı aldım, size en kısa sürede dönüş sağlayacağım. 🙏"
+          : "Momentan gibt es ein technisches Problem. Ich habe Ihre Nachricht erhalten und melde mich schnellstmöglich. 🙏";
 
-      try {
-        await client.sendText(message.from, fallback);
-      } catch (e2) {
-        console.error("❌ Fallback da gönderilemedi:", e2);
-      }
+      await client.sendText(message.from, fallback);
     }
   });
 }
 
-// ----------------------------------------------------------------------
-// HTTP SERVER
-// ----------------------------------------------------------------------
+// --- HTTP SERVER ---
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🌐 HTTP server çalışıyor: http://localhost:${PORT}`);
 });
