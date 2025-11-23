@@ -1,5 +1,6 @@
 // index.js
-// WhatsApp Bot + OpenAI TR/DE Kurumsal Tekstil Asistanı + QR PNG endpoint
+// WhatsApp Bot + OpenAI TR/DE Kurumsal Tekstil Asistanı
+// QR kodu Railway'de dosya yerine RAM'de (base64) tutar ve /qr.png üzerinden gösterir.
 
 require("dotenv").config();
 const express = require("express");
@@ -9,95 +10,45 @@ const OpenAI = require("openai");
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// ---- QR hafızası ----
-let lastQrPng = null;        // Buffer halinde QR resmi
-let lastQrTime = null;       // Ne zaman üretildi
-let isAuthenticated = false; // Telefona bağlandı mı?
+// QR'ı RAM'de tutacağımız değişken
+let latestQrDataUrl = null;
 
-// ---- OpenAI client ----
+// OpenAI client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// ---- Health check ----
+// 1) Health-check (Railway)
 app.get("/", (req, res) => {
   res.send("WhatsApp Textile Assistant bot is running 🚀");
 });
 
-// ---- QR PNG endpoint ----
+// 2) QR'ı PNG olarak dönen endpoint
 app.get("/qr.png", (req, res) => {
-  // Eğer zaten bağlandıysak kullanıcıya bilgi ver
-  if (isAuthenticated) {
-    return res
-      .status(410)
-      .send("Bot zaten WhatsApp'a bağlandı, yeni QR kodu yok. ✅");
-  }
+  try {
+    if (!latestQrDataUrl) {
+      return res.send("QR henüz hazır değil. Lütfen birkaç saniye sonra sayfayı yenileyin.");
+    }
 
-  if (!lastQrPng) {
-    return res
-      .status(503)
-      .send("QR henüz hazır değil. Lütfen birkaç saniye sonra sayfayı yenileyin.");
-  }
+    // latestQrDataUrl formatı: "data:image/png;base64,AAAA...."
+    const base64Data = latestQrDataUrl.replace(/^data:image\/png;base64,/, "");
+    const buffer = Buffer.from(base64Data, "base64");
 
-  res.setHeader("Content-Type", "image/png");
-  res.setHeader("Cache-Control", "no-store, max-age=0");
-  res.send(lastQrPng);
+    res.writeHead(200, {
+      "Content-Type": "image/png",
+      "Content-Length": buffer.length,
+    });
+
+    return res.end(buffer);
+  } catch (err) {
+    console.error("❌ /qr.png endpoint'inde hata:", err);
+    return res.status(500).send("QR görüntülenirken bir hata oluştu.");
+  }
 });
 
-// ---- WhatsApp Bot'u başlat ----
-create({
-  sessionId: "feyz-bot",
-  multiDevice: true,
-  headless: true,
-  useChrome: false,
-  authTimeout: 0,
-  restartOnCrash: true,
-  cacheEnabled: false,
-  killProcessOnBrowserClose: false,
-  sessionDataPath: "./session",
-
-  // QR konsola ASCII basmasın, biz PNG yakalıyoruz
-  qrLogSkip: true,
-  qrTimeout: 0,
-  qrRefreshS: 0,
-  qrOutput: "base64",
-
-  // EN ÖNEMLİ KISIM: QR CALLBACK
-  qrCallback: (qrData, asciiQR, attempts) => {
-    try {
-      console.log("📲 Yeni QR üretildi. Deneme:", attempts);
-
-      // qrData genelde "data:image/png;base64,AAAA..." formatında
-      const base64 = String(qrData).replace(/^data:image\/png;base64,/, "");
-      lastQrPng = Buffer.from(base64, "base64");
-      lastQrTime = Date.now();
-    } catch (err) {
-      console.error("❌ QR callback içinde hata:", err);
-    }
-  },
-})
-  .then(async (client) => {
-    console.log("✅ WhatsApp bot başlatıldı, client hazır!");
-    startBot(client);
-
-    // Bağlanınca QR'a gerek kalmasın diye flag tutalım
-    try {
-      client.onStateChanged((state) => {
-        console.log("📡 WhatsApp state:", state);
-        if (state === "CONNECTED" || state === "OPENING") {
-          isAuthenticated = true;
-        }
-      });
-    } catch (err) {
-      console.error("onStateChanged hata:", err);
-    }
-  })
-  .catch((err) => {
-    console.error("❌ Bot başlatılamadı:", err);
-  });
-
 /**
- * Dil tespiti – Türkçe karakter varsa TR, yoksa DE
+ * Dil tespiti – çok kaba ama iş görür:
+ * Türkçe karakter içeriyorsa TR ağırlıklı, yoksa DE ağırlıklı.
  */
 function detectLanguage(text) {
   const trChars = /[çğıöşüÇĞİÖŞÜ]/;
@@ -110,7 +61,7 @@ function detectLanguage(text) {
  */
 async function generateAiReply(userText, lang) {
   const baseSystemPrompt = `
-Sen, Avrupa'nın her yerine premium *1. sınıf tekstil ürünleri* tedarik eden kurumsal bir firmanın 
+Sen, Avrupa'nın her yerine premium tekstil ürünleri tedarik eden kurumsal bir firmanın 
 uluslararası müşteri temsilcisisin. Tonun:
 - Profesyonel,
 - Samimi,
@@ -121,6 +72,8 @@ Müşterinin ihtiyacını netleştir:
 - Hangi ürün(ler)le ilgilendiğini sor (otel tekstili, masa örtüsü, havlu, nevresim, vb.),
 - Metraj / adet, hedef fiyat aralığı, teslim süresi gibi kritik bilgileri nazikçe iste,
 - Teknik detayları (gramaj, kumaş türü, renk, ölçü vb.) sorarken müşteriyi boğma.
+
+Sadece 1. sınıf tekstil ürünleri üretiyoruz, buna göre cevap ver.
 
 Fiyat VERME, sadece:
 - “Teklif için ölçü, adet ve teslim adresi bilgilerinizi paylaşabilir misiniz?” gibi cümlelerle bilgi topla,
@@ -135,7 +88,7 @@ ${baseSystemPrompt}
 Cevap dili: TÜRKÇE.
 Samimi ama saygılı hitap kullan ("siz" formu).
 Müşteriyle ilk defa yazışıyorsan kendini kısaca tanıt:
-"Ben Firma'nın uluslararası satış ekibindenim."
+"Ben Firma uluslararası satış ekibindenim."
 `;
 
   const systemPromptDe = `
@@ -149,8 +102,14 @@ Stell kurze, gezielte Fragen, um Bedarf, Menge und Lieferadresse zu klären.
   const systemPrompt = lang === "tr" ? systemPromptTr : systemPromptDe;
 
   const input = [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: userText },
+    {
+      role: "system",
+      content: systemPrompt,
+    },
+    {
+      role: "user",
+      content: userText,
+    },
   ];
 
   const response = await openai.responses.create({
@@ -162,14 +121,12 @@ Stell kurze, gezielte Fragen, um Bedarf, Menge und Lieferadresse zu klären.
   return content.trim();
 }
 
-/**
- * Mesajlara cevap veren fonksiyon
- */
+// 3) Mesajlara cevap veren fonksiyon
 function startBot(client) {
   console.log("🤖 startBot fonksiyonu çalıştı, mesajlar dinleniyor...");
 
   client.onMessage(async (message) => {
-    // Kendi mesajımıza cevap verme
+    // Kendi gönderdiğimiz mesajlara cevap verme
     if (message.fromMe) return;
 
     const text = (message.body || "").trim();
@@ -181,7 +138,7 @@ function startBot(client) {
       text,
     });
 
-    // Grup mesajlarını pas geç
+    // Grup mesajlarını şimdilik pas geç
     if (message.isGroupMsg) {
       console.log("↩️ Grup mesajı, cevaplanmıyor.");
       return;
@@ -215,7 +172,44 @@ function startBot(client) {
   });
 }
 
-// ---- HTTP server (Railway için zorunlu) ----
+// 4) WhatsApp Bot Başlatma
+create({
+  sessionId: "feyz-bot",
+  multiDevice: true,
+  headless: true,       // Railway'de her zaman true
+  useChrome: false,     // Railway container içi Chromium
+  authTimeout: 0,
+  restartOnCrash: true,
+  cacheEnabled: false,
+  killProcessOnBrowserClose: false,
+  qrLogSkip: true,      // Konsola QR ascii basma
+  qrTimeout: 0,
+  qrRefreshS: 45,       // 45 sn'de bir yeni QR üret
+  qrCallback: (qrData, asciiQR, attempts, urlCode) => {
+    // qrData: "data:image/png;base64,AAAA..."
+    latestQrDataUrl = qrData;
+    console.log("✅ Yeni QR alındı ve RAM'e kaydedildi. Deneme sayısı:", attempts);
+  },
+  chromiumArgs: [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-extensions",
+    "--disable-software-rasterizer",
+    "--disable-features=VizDisplayCompositor",
+    "--window-size=1920,1080",
+  ],
+})
+  .then((client) => {
+    console.log("✅ WhatsApp bot başlatıldı, client hazır!");
+    startBot(client);
+  })
+  .catch((err) => {
+    console.error("❌ Bot başlatılamadı:", err);
+  });
+
+// 5) HTTP server (Railway için zorunlu)
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🌐 HTTP server çalışıyor: http://0.0.0.0:${PORT}`);
+  console.log(`🌐 HTTP server çalışıyor: http://localhost:${PORT}`);
 });
