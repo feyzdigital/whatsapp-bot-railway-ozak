@@ -5,16 +5,13 @@ npm-debug.log*
 
 # Oturum ve cache
 session/
-.node-persist/
+session/*
 
 # Ortam değişkenleri / gizli bilgiler
 .env
 .env.*
 *.env
 
-# Ekran görüntüleri (QR)
-screenshot_feyz-bot_*.png
-
-# Herhangi bir GCP key dosyası (ileride kullanırsan buraya ekle)
-# gcp-key.json
-# service-account.json
+# Ekran görüntüleri / QR
+screenshot_*.png
+session/*.png
