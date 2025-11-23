@@ -1,17 +1,19 @@
-# Node ve derleme klasörleri
+# Node
 node_modules/
 npm-debug.log*
 .DS_Store
 
-# Oturum ve cache
+# Session & Cache
 session/
-session/*
+.node-persist/
 
-# Ortam değişkenleri / gizli bilgiler
+# Environment
 .env
 .env.*
 *.env
 
-# Ekran görüntüleri / QR
-screenshot_*.png
-session/*.png
+# QR Screenshots (wa-automate)
+screenshot_feyz-bot_*.png
+
+# OS Temp
+Thumbs.db
