@@ -1,41 +1,53 @@
 // index.js
-// WhatsApp Bot + OpenAI TR/DE Kurumsal Tekstil Asistanı
+// WhatsApp Bot + OpenAI TR/DE Kurumsal Tekstil Asistanı + QR PNG çıktısı
 
 require("dotenv").config();
 const express = require("express");
+const path = require("path");
+const fs = require("fs");
+const QRCode = require("qrcode");
 const { create } = require("@open-wa/wa-automate");
 const OpenAI = require("openai");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// OpenAI client
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
-// Basit health-check (Railway için)
+// ---------- 1) HEALTH CHECK ----------
 app.get("/", (req, res) => {
   res.send("WhatsApp Textile Assistant bot is running 🚀");
 });
 
-/**
- * Dil tespiti – kabaca:
- * Türkçe karakter içeriyorsa TR, yoksa DE.
- */
+// ---------- 2) QR PNG SERVİSİ ----------
+// QR dosyası: /public/qr.png olarak kaydedilecek
+app.get("/qr.png", (req, res) => {
+  const filePath = path.join(__dirname, "public", "qr.png");
+
+  if (!fs.existsSync(filePath)) {
+    return res
+      .status(404)
+      .send("QR henüz hazır değil. Lütfen birkaç saniye sonra tekrar deneyin.");
+  }
+
+  res.sendFile(filePath);
+});
+
+// ---------- 3) OPENAI CLIENT ----------
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+// ---------- 4) DİL TESPİTİ ----------
 function detectLanguage(text) {
   const trChars = /[çğıöşüÇĞİÖŞÜ]/;
   if (trChars.test(text)) return "tr";
   return "de";
 }
 
-/**
- * OpenAI'den cevap üret – kurumsal + samimi tekstil temsilcisi
- */
+// ---------- 5) OPENAI CEVAP ----------
 async function generateAiReply(userText, lang) {
   const baseSystemPrompt = `
-Sen, Avrupa'nın her yerine premium 1. sınıf tekstil ürünleri tedarik eden
-kurumsal bir firmanın uluslararası müşteri temsilcisisin. Tonun:
+Sen, Avrupa'nın her yerine premium 1. sınıf tekstil ürünleri tedarik eden kurumsal bir firmanın 
+uluslararası müşteri temsilcisisin. Tonun:
 - Profesyonel,
 - Samimi,
 - Çözüm odaklı,
@@ -50,8 +62,7 @@ Fiyat VERME, sadece:
 - “Teklif için ölçü, adet ve teslim adresi bilgilerinizi paylaşabilir misiniz?” gibi cümlelerle bilgi topla,
 - Sonunda her zaman “İsterseniz numune / fotoğraf da paylaşabiliriz.” tarzı bir cümle ekle.
 
-Mesajların her zaman WhatsApp için hazır, tek blok metin olsun
-(gerekirse madde madde kullanabilirsin).
+Mesajların her zaman WhatsApp için hazır, tek blok metin olsun (madde madde kullanabilirsin).
 `;
 
   const systemPromptTr = `
@@ -60,7 +71,7 @@ ${baseSystemPrompt}
 Cevap dili: TÜRKÇE.
 Samimi ama saygılı hitap kullan ("siz" formu).
 Müşteriyle ilk defa yazışıyorsan kendini kısaca tanıt:
-"Ben firmanın uluslararası satış ekibindenim."
+"Ben Firma uluslararası satış ekibindenim."
 `;
 
   const systemPromptDe = `
@@ -74,14 +85,8 @@ Stell kurze, gezielte Fragen, um Bedarf, Menge und Lieferadresse zu klären.
   const systemPrompt = lang === "tr" ? systemPromptTr : systemPromptDe;
 
   const input = [
-    {
-      role: "system",
-      content: systemPrompt,
-    },
-    {
-      role: "user",
-      content: userText,
-    },
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userText },
   ];
 
   const response = await openai.responses.create({
@@ -93,64 +98,11 @@ Stell kurze, gezielte Fragen, um Bedarf, Menge und Lieferadresse zu klären.
   return content.trim();
 }
 
-/**
- * Botu başlatan fonksiyon
- */
-function startBot(client) {
-  console.log("🤖 startBot fonksiyonu çalıştı, mesajlar dinleniyor...");
-
-  client.onMessage(async (message) => {
-    try {
-      // Kendi gönderdiğimiz mesajlara cevap verme
-      if (message.fromMe) return;
-
-      const text = (message.body || "").trim();
-      if (!text) return;
-
-      console.log("📩 Yeni mesaj:", {
-        from: message.from,
-        chatName: message.sender?.pushname,
-        text,
-      });
-
-      // Grup mesajlarını şimdilik pas geç
-      if (message.isGroupMsg) {
-        console.log("↩️ Grup mesajı, cevaplanmıyor.");
-        return;
-      }
-
-      const lang = detectLanguage(text);
-      const reply = await generateAiReply(text, lang);
-
-      if (!reply) {
-        throw new Error("Boş AI cevabı döndü.");
-      }
-
-      await client.sendText(message.from, reply);
-      console.log("✅ Yanıt gönderildi.");
-    } catch (err) {
-      console.error("❌ Mesaj yanıtlarken hata:", err);
-
-      const lang = detectLanguage(message.body || "");
-      const fallback =
-        lang === "tr"
-          ? "Şu an teknik bir sorun yaşıyoruz, mesajınızı aldım ve ekibimize ilettim. En kısa sürede size dönüş yapacağız. 🙏"
-          : "Im Moment gibt es ein technisches Problem. Ich habe Ihre Nachricht erhalten und an unser Team weitergeleitet. Wir melden uns so schnell wie möglich. 🙏";
-
-      try {
-        await client.sendText(message.from, fallback);
-      } catch (e2) {
-        console.error("❌ Fallback mesaj da gönderilemedi:", e2);
-      }
-    }
-  });
-}
-
-// WhatsApp Bot Başlatma
+// ---------- 6) WHATSAPP BOT BAŞLATMA ----------
 create({
   sessionId: "feyz-bot",
   multiDevice: true,
-  headless: true, // Railway'de her zaman true
+  headless: true,
   useChrome: false,
   authTimeout: 0,
   restartOnCrash: true,
@@ -158,12 +110,33 @@ create({
   killProcessOnBrowserClose: false,
   sessionDataPath: "./session",
 
-  // QR ayarları – loglara ASCII QR basılsın
-  qrLogSkip: false,      // ÖNEMLİ: QR terminal/loglarda görünecek
-  qrRefreshS: 60,
+  // Log'da ASCII QR göstermesin, PNG'ye güveneceğiz
+  qrLogSkip: true,
+  qrRefreshS: 0,
   qrTimeout: 0,
-  qrOutput: "terminal",  // ASCII QR
+  qrOutput: "png",
   qrScreenshot: false,
+
+  // Yeni QR üretildiğinde PNG olarak kaydet
+  qrCallback: async (qrData, sessionId) => {
+    try {
+      const publicDir = path.join(__dirname, "public");
+      if (!fs.existsSync(publicDir)) {
+        fs.mkdirSync(publicDir);
+      }
+
+      const filePath = path.join(publicDir, "qr.png");
+
+      await QRCode.toFile(filePath, qrData, {
+        width: 512,
+        margin: 2,
+      });
+
+      console.log("✅ QR PNG oluşturuldu:", filePath);
+    } catch (err) {
+      console.error("❌ QR PNG oluşturulurken hata:", err);
+    }
+  },
 
   chromiumArgs: [
     "--no-sandbox",
@@ -184,16 +157,54 @@ create({
     console.error("❌ Bot başlatılamadı:", err);
   });
 
-// HTTP server (Railway için zorunlu)
+// ---------- 7) MESAJ DİNLER ----------
+function startBot(client) {
+  console.log("🤖 startBot fonksiyonu çalıştı, mesajlar dinleniyor...");
+
+  client.onMessage(async (message) => {
+    if (message.fromMe) return; // kendi mesajımıza cevap verme
+
+    const text = (message.body || "").trim();
+    if (!text) return;
+
+    console.log("📩 Yeni mesaj:", {
+      from: message.from,
+      chatName: message.sender?.pushname,
+      text,
+    });
+
+    if (message.isGroupMsg) {
+      console.log("↩️ Grup mesajı, cevaplanmıyor.");
+      return;
+    }
+
+    const lang = detectLanguage(text);
+
+    try {
+      const reply = await generateAiReply(text, lang);
+
+      if (!reply) throw new Error("Boş AI cevabı döndü.");
+
+      await client.sendText(message.from, reply);
+      console.log("✅ Yanıt gönderildi.");
+    } catch (err) {
+      console.error("❌ Mesaj yanıtlarken hata:", err);
+
+      const fallback =
+        lang === "tr"
+          ? "Şu an teknik bir sorun yaşıyoruz, mesajınızı aldım ve ekibimize ilettim. En kısa sürede size dönüş yapacağız. 🙏"
+          : "Im Moment gibt es ein technisches Problem. Ich habe Ihre Nachricht erhalten und an unser Team weitergeleitet. Wir melden uns so schnell wie möglich. 🙏";
+
+      try {
+        await client.sendText(message.from, fallback);
+      } catch (e2) {
+        console.error("❌ Fallback mesaj da gönderilemedi:", e2);
+      }
+    }
+  });
+}
+
+// ---------- 8) HTTP SERVER ----------
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🌐 HTTP server çalışıyor: http://localhost:${PORT}`);
-});
-
-// Güvenlik: beklenmeyen hataları logla
-process.on("unhandledRejection", (reason) => {
-  console.error("⚠️ Unhandled Rejection:", reason);
-});
-
-process.on("uncaughtException", (err) => {
-  console.error("⚠️ Uncaught Exception:", err);
 });
