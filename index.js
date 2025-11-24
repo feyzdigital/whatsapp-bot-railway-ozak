@@ -1,231 +1,50 @@
-// index.js
-// WhatsApp Bot + OpenAI TR/DE Kurumsal Tekstil Asistanı
-// QR hafızada tutuluyor ve /qr.png endpoint'inden servis ediliyor.
-
-require("dotenv").config();
-const express = require("express");
-const { create } = require("@open-wa/wa-automate");
-const OpenAI = require("openai");
+import express from "express";
+import { create } from "@open-wa/wa-automate";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 
-// ------------------------
-// OpenAI client
-// ------------------------
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+let qrPngBuffer = null;   // QR kod PNG hafızada tutulacak
 
-// ------------------------
-// Global QR değişkenleri
-// ------------------------
-let latestQrDataUrl = null; // "data:image/png;base64,..." formatında
-let lastQrAttempt = 0;
-
-// ------------------------
-// Health-check (Railway)
-// ------------------------
 app.get("/", (req, res) => {
   res.send("WhatsApp Textile Assistant bot is running 🚀");
 });
 
-// ------------------------
-// QR PNG endpoint
-// ------------------------
+// PNG olarak QR dönen endpoint
 app.get("/qr.png", (req, res) => {
-  if (!latestQrDataUrl) {
-    return res
-      .status(503)
-      .send("QR henüz hazır değil. Lütfen birkaç saniye sonra sayfayı yenileyin.");
+  if (!qrPngBuffer) {
+    return res.send("QR henüz hazır değil. Lütfen birkaç saniye sonra yenileyin.");
   }
 
-  try {
-    const base64 = latestQrDataUrl.replace(/^data:image\/png;base64,/, "");
-    const imgBuffer = Buffer.from(base64, "base64");
-
-    res.setHeader("Content-Type", "image/png");
-    res.setHeader("Cache-Control", "no-store");
-    return res.send(imgBuffer);
-  } catch (err) {
-    console.error("❌ QR PNG oluşturulurken hata:", err);
-    return res.status(500).send("QR oluşturulurken hata oluştu.");
-  }
+  res.setHeader("Content-Type", "image/png");
+  res.send(qrPngBuffer);
 });
 
-// ------------------------
-// WhatsApp Bot Başlatma
-// ------------------------
-const waOptions = {
+// WhatsApp başlat
+create({
   sessionId: "feyz-bot",
   multiDevice: true,
-  headless: true, // Railway'de her zaman true
-  useChrome: false,
-  authTimeout: 0,
-  restartOnCrash: true,
-  cacheEnabled: false,
-  killProcessOnBrowserClose: false,
-  sessionDataPath: "./session",
-
-  // QR ile ilgili ayarlar
   qrTimeout: 0,
-  qrRefreshS: 0,
-  qrOutput: "image",   // base64 image alacağız
-  qrLogSkip: true,     // konsolda ASCII QR karmaşası olmasın
-
-  chromiumArgs: [
-    "--no-sandbox",
-    "--disable-setuid-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-gpu",
-    "--disable-extensions",
-    "--disable-software-rasterizer",
-    "--disable-features=VizDisplayCompositor",
-    "--window-size=1920,1080",
-  ],
-};
-
-// QR callback'i burada, create'in 2. parametresinde:
-create(waOptions, (qrData, asciiQR, attempt /*, urlCode */) => {
-  try {
-    latestQrDataUrl = qrData;
-    lastQrAttempt = attempt;
-    console.log("📸 Yeni QR alındı (attempt:", attempt, ")");
-  } catch (err) {
-    console.error("❌ QR callback içinde hata:", err);
+  authTimeout: 0,
+  qrLogSkip: true, // konsola QR basmayı devre dışı bırak
+}, 
+// BU QR CALLBACK PNG ÜRETİR
+(qrData, qrPng) => {
+  if (qrPng) {
+    qrPngBuffer = qrPng; // PNG hafızaya alınır
+    console.log("✔️ Yeni QR PNG üretildi.");
   }
 })
-  .then((client) => {
-    console.log("✅ WhatsApp bot başlatıldı, client hazır!");
-    startBot(client);
-  })
-  .catch((err) => {
-    console.error("❌ Bot başlatılamadı:", err);
-  });
+.then(client => startBot(client));
 
-/**
- * Dil tespiti – çok kaba ama iş görür:
- * Türkçe karakter içeriyorsa TR ağırlıklı, yoksa DE ağırlıklı.
- */
-function detectLanguage(text) {
-  const trChars = /[çğıöşüÇĞİÖŞÜ]/;
-  if (trChars.test(text)) return "tr";
-  return "de";
-}
-
-/**
- * OpenAI'den cevap üret – kurumsal + samimi tekstil temsilcisi
- */
-async function generateAiReply(userText, lang) {
-  const baseSystemPrompt = `
-Sen, Avrupa'nın her yerine premium tekstil ürünleri tedarik eden kurumsal bir firmanın 
-uluslararası müşteri temsilcisisin. Tonun:
-- Profesyonel,
-- Samimi,
-- Çözüm odaklı,
-- WhatsApp sohbetine uygun kısa paragraflar halinde.
-
-Müşterinin ihtiyacını netleştir:
-- Hangi ürün(ler)le ilgilendiğini sor (otel tekstili, masa örtüsü, havlu, nevresim, vb.),
-- Metraj / adet, hedef fiyat aralığı, teslim süresi gibi kritik bilgileri nazikçe iste,
-- Teknik detayları (gramaj, kumaş türü, renk, ölçü vb.) sorarken müşteriyi boğma.
-
-Fiyat VERME, sadece:
-- “Teklif için ölçü, adet ve teslim adresi bilgilerinizi paylaşabilir misiniz?” gibi cümlelerle bilgi topla,
-- Sonunda her zaman “İsterseniz numune / fotoğraf da paylaşabiliriz.” tarzı bir cümle ekle.
-
-Mesajların her zaman WhatsApp için hazır, tek blok metin olsun (madde madde kullanabilirsin).
-`;
-
-  const systemPromptTr = `
-${baseSystemPrompt}
-
-Cevap dili: TÜRKÇE.
-Samimi ama saygılı hitap kullan ("siz" formu).
-Müşteriyle ilk defa yazışıyorsan kendini kısaca tanıt:
-"Ben Firma uluslararası satış ekibindenim."
-`;
-
-  const systemPromptDe = `
-${baseSystemPrompt}
-
-Antwortsprache: DEUTSCH.
-Höflich, professionell, aber locker und natürlich.
-Stell kurze, gezielte Fragen, um Bedarf, Menge und Lieferadresse zu klären.
-`;
-
-  const systemPrompt = lang === "tr" ? systemPromptTr : systemPromptDe;
-
-  const input = [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: userText },
-  ];
-
-  const response = await openai.responses.create({
-    model: "gpt-5.1-mini",
-    input,
-  });
-
-  const content = response.output[0]?.content?.[0]?.text || "";
-  return content.trim();
-}
-
-// ------------------------
-// Mesajlara cevap veren fonksiyon
-// ------------------------
 function startBot(client) {
-  console.log("🤖 startBot fonksiyonu çalıştı, mesajlar dinleniyor...");
+  console.log("WhatsApp bot connected!");
 
-  client.onMessage(async (message) => {
-    // Kendi gönderdiğimiz mesajlara cevap verme
-    if (message.fromMe) return;
-
-    const text = (message.body || "").trim();
-    if (!text) return;
-
-    console.log("📩 Yeni mesaj:", {
-      from: message.from,
-      chatName: message.sender?.pushname,
-      text,
-    });
-
-    // Grup mesajlarını şimdilik pas geç
-    if (message.isGroupMsg) {
-      console.log("↩️ Grup mesajı, cevaplanmıyor.");
-      return;
-    }
-
-    const lang = detectLanguage(text);
-
-    try {
-      const reply = await generateAiReply(text, lang);
-
-      if (!reply) {
-        throw new Error("Boş AI cevabı döndü.");
-      }
-
-      await client.sendText(message.from, reply);
-      console.log("✅ Yanıt gönderildi.");
-    } catch (err) {
-      console.error("❌ Mesaj yanıtlarken hata:", err);
-
-      const fallback =
-        lang === "tr"
-          ? "Şu an teknik bir sorun yaşıyoruz, mesajınızı aldım ve ekibimize ilettim. En kısa sürede size dönüş yapacağız. 🙏"
-          : "Im Moment gibt es ein technisches Problem. Ich habe Ihre Nachricht erhalten und an unser Team weitergeleitet. Wir melden uns so schnell wie möglich. 🙏";
-
-      try {
-        await client.sendText(message.from, fallback);
-      } catch (e2) {
-        console.error("❌ Fallback mesaj da gönderilemedi:", e2);
-      }
+  client.onMessage(async msg => {
+    if (msg.body === "merhaba") {
+      await client.sendText(msg.from, "Merhaba! 👋 Nasıl yardımcı olabilirim?");
     }
   });
 }
 
-// ------------------------
-// HTTP server (Railway için zorunlu)
-// ------------------------
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🌐 HTTP server çalışıyor: http://localhost:${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
