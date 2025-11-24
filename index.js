@@ -1,6 +1,6 @@
 // index.js
 // WhatsApp Bot + OpenAI TR/DE Kurumsal Tekstil Asistanı
-// QR artık dosyaya değil hafızaya yazılıyor ve /qr.png'den servis ediliyor.
+// QR hafızada tutuluyor ve /qr.png endpoint'inden servis ediliyor.
 
 require("dotenv").config();
 const express = require("express");
@@ -18,7 +18,7 @@ const openai = new OpenAI({
 });
 
 // ------------------------
-// Global QR değişkeni
+// Global QR değişkenleri
 // ------------------------
 let latestQrDataUrl = null; // "data:image/png;base64,..." formatında
 let lastQrAttempt = 0;
@@ -33,12 +33,11 @@ app.get("/", (req, res) => {
 // ------------------------
 // QR PNG endpoint
 // ------------------------
-// Bu endpoint, hafızaya gelen en son QR'ı PNG olarak döner.
 app.get("/qr.png", (req, res) => {
   if (!latestQrDataUrl) {
     return res
       .status(503)
-      .send("QR henüz hazır değil. Lütfen bir süre sonra sayfayı yenileyin.");
+      .send("QR henüz hazır değil. Lütfen birkaç saniye sonra sayfayı yenileyin.");
   }
 
   try {
@@ -57,7 +56,7 @@ app.get("/qr.png", (req, res) => {
 // ------------------------
 // WhatsApp Bot Başlatma
 // ------------------------
-create({
+const waOptions = {
   sessionId: "feyz-bot",
   multiDevice: true,
   headless: true, // Railway'de her zaman true
@@ -67,18 +66,13 @@ create({
   cacheEnabled: false,
   killProcessOnBrowserClose: false,
   sessionDataPath: "./session",
-  // QR'ı log'a basmasını engelliyoruz (ASCII karmaşası olmasın)
-  qrLogSkip: true,
+
+  // QR ile ilgili ayarlar
   qrTimeout: 0,
   qrRefreshS: 0,
-  qrOutput: "image",
-  // En kritik kısım: QR callback
-  qrCallback: (qrData, asciiQR, attempt) => {
-    // qrData → "data:image/png;base64,...."
-    latestQrDataUrl = qrData;
-    lastQrAttempt = attempt;
-    console.log("📸 Yeni QR alındı, attempt:", attempt);
-  },
+  qrOutput: "image",   // base64 image alacağız
+  qrLogSkip: true,     // konsolda ASCII QR karmaşası olmasın
+
   chromiumArgs: [
     "--no-sandbox",
     "--disable-setuid-sandbox",
@@ -89,6 +83,17 @@ create({
     "--disable-features=VizDisplayCompositor",
     "--window-size=1920,1080",
   ],
+};
+
+// QR callback'i burada, create'in 2. parametresinde:
+create(waOptions, (qrData, asciiQR, attempt /*, urlCode */) => {
+  try {
+    latestQrDataUrl = qrData;
+    lastQrAttempt = attempt;
+    console.log("📸 Yeni QR alındı (attempt:", attempt, ")");
+  } catch (err) {
+    console.error("❌ QR callback içinde hata:", err);
+  }
 })
   .then((client) => {
     console.log("✅ WhatsApp bot başlatıldı, client hazır!");
