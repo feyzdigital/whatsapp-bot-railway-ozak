@@ -6,19 +6,20 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 
 // QR ve durum bilgileri hafızada tutulacak
-let latestQrDataUrl = null;       // data:image/png;base64,....
+let latestQrDataUrl = null;       // data:image/png;base64,...
 let latestQrTimestamp = null;     // Date.now()
 let isAuthenticated = false;      // true olduğunda QR'a gerek yok
 
-// ---- OpenAI veya başka cevaplama mantığını buraya yazacağız ---- //
-// Şimdilik test amaçlı basit cevap:
+// ---- OpenAI veya başka cevaplama mantığını buraya ekleyeceğiz ---- //
+// Şimdilik sadece test amaçlı TR/DE karışık bir cevap dönüyor:
 async function generateReply(message) {
   return `Merhaba! 👋
 
 Mesajını aldım:
 "${message}"
 
-Bu sadece test cevabıdır. Sistem stabil çalışınca buraya OpenAI tabanlı TR/DE kurumsal tekstil asistanını ekleyeceğiz.`;
+Bu mesaj şu an test ortamından geliyor.
+Birazdan buraya OpenAI tabanlı TR/DE kurumsal tekstil asistanını bağlayacağız.`;
 }
 
 // ---- WhatsApp client'i başlatan fonksiyon ---- //
@@ -31,9 +32,9 @@ function start() {
       multiDevice: true,
 
       // QR ayarları
-      qrTimeout: 0,           // QR süresiz beklesin
+      qrTimeout: 0,           // QR süresiz beklesin, Railway kill etmesin
       authTimeout: 0,
-      qrLogSkip: true,        // ASCII QR KAPALI (terminalde bozuk QR istemiyoruz)
+      qrLogSkip: true,        // ASCII QR yazdırma (terminalde bozuk görünmesin)
 
       // Headless Chrome / Railway uyumu
       headless: true,
@@ -55,12 +56,18 @@ function start() {
         '--disable-dev-shm-usage'
       ],
 
-      // İLERİ AŞAMADA kullanabileceğimiz seçenekler (şimdilik kapalı):
+      // İLERİ AŞAMADA kullanabileceğimiz ayarlar (şimdilik kapalı):
       // sessionData: process.env.WA_SESSION_DATA || undefined,
       // sessionDataPath: './session'
     },
-    // QR CALLBACK → base64 PNG buradan gelecek
+
+    // QR CALLBACK → base64 PNG burada geliyor
     (base64Qr, asciiQR, attempt, urlCode) => {
+      if (!base64Qr) {
+        console.log('QR callback çağrıldı ama base64Qr boş geldi!');
+        return;
+      }
+
       latestQrDataUrl = base64Qr;         // data:image/png;base64,...
       latestQrTimestamp = Date.now();
       isAuthenticated = false;
