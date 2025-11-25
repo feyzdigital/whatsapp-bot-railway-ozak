@@ -1,6 +1,7 @@
 // index.js
 const { create } = require('@open-wa/wa-automate');
 const express = require('express');
+const QRCode = require('qrcode');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -10,7 +11,7 @@ let latestQrDataUrl = null;       // data:image/png;base64,...
 let latestQrTimestamp = null;     // Date.now()
 let isAuthenticated = false;      // true olduğunda QR'a gerek yok
 
-// ---- OpenAI veya başka cevaplama mantığını buraya ekleyeceğiz ---- //
+// ---- Test cevaplayıcı (sonra OpenAI bağlayacağız) ---- //
 async function generateReply(message) {
   return `Merhaba! 👋
 
@@ -34,18 +35,41 @@ function start() {
     authTimeout: 0,
     qrLogSkip: true,
 
-    // *** ASIL ÖNEMLİ KISIM: QR CALLBACK BURADA ***
-    qrCallback: (base64Qr, asciiQR, attempt, urlCode) => {
-      if (!base64Qr) {
-        console.log('QR callback çağrıldı ama base64Qr boş geldi!');
-        return;
+    // *** EN KRİTİK KISIM: QR CALLBACK ***
+    qrCallback: async (base64Qr, asciiQR, attempt, urlCode) => {
+      console.log('qrCallback tetiklendi. attempt:', attempt);
+
+      try {
+        // 1) Eğer OpenWA zaten base64 PNG veriyorsa direkt kullan
+        if (base64Qr && typeof base64Qr === 'string' && base64Qr.startsWith('data:image')) {
+          latestQrDataUrl = base64Qr;
+          latestQrTimestamp = Date.now();
+          isAuthenticated = false;
+          console.log('base64Qr doğrudan kullanıldı.');
+          return;
+        }
+
+        // 2) Aksi halde urlCode'dan kendi PNG'mizi üretelim
+        if (urlCode && typeof urlCode === 'string') {
+          console.log('base64Qr yok, urlCode ile PNG üretiliyor...');
+          const dataUrl = await QRCode.toDataURL(urlCode, {
+            errorCorrectionLevel: 'M',
+            margin: 2,
+            scale: 8
+          });
+
+          latestQrDataUrl = dataUrl;      // data:image/png;base64,...
+          latestQrTimestamp = Date.now();
+          isAuthenticated = false;
+          console.log('QR PNG, qrcode kütüphanesi ile üretildi.');
+          return;
+        }
+
+        // 3) Hiçbiri gelmezse logla
+        console.log('Ne base64Qr ne urlCode geldi. asciiQR uzunluğu:', asciiQR ? asciiQR.length : null);
+      } catch (err) {
+        console.error('qrCallback içinde hata:', err);
       }
-
-      latestQrDataUrl = base64Qr;         // data:image/png;base64,...
-      latestQrTimestamp = Date.now();
-      isAuthenticated = false;
-
-      console.log('Yeni QR üretildi. Deneme:', attempt);
     },
 
     // Headless Chrome / Railway uyumu
@@ -66,9 +90,9 @@ function start() {
       '--no-zygote',
       '--single-process',
       '--disable-dev-shm-usage'
-    ],
+    ]
 
-    // İLERİ AŞAMADA:
+    // İLERİ AŞAMA:
     // sessionData: process.env.WA_SESSION_DATA || undefined,
     // sessionDataPath: './session'
   })
