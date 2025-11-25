@@ -11,10 +11,8 @@ let latestQrTimestamp = null;     // Date.now()
 let isAuthenticated = false;      // true olduğunda QR'a gerek yok
 
 // ---- OpenAI veya başka cevaplama mantığını buraya yazacağız ---- //
-// Şimdilik basit bir placeholder bırakıyorum
+// Şimdilik test amaçlı basit cevap:
 async function generateReply(message) {
-  // Buraya mevcut OpenAI entegrasyon kodunu koyabilirsin.
-  // Şimdilik sadece test amaçlı sabit TR/DE cevap dönsün:
   return `Merhaba! 👋
 
 Mesajını aldım:
@@ -33,7 +31,7 @@ function start() {
       multiDevice: true,
 
       // QR ayarları
-      qrTimeout: 0,           // QR süresiz beklesin, Railway'in kill etmesini istemiyoruz
+      qrTimeout: 0,           // QR süresiz beklesin
       authTimeout: 0,
       qrLogSkip: true,        // ASCII QR KAPALI (terminalde bozuk QR istemiyoruz)
 
@@ -57,7 +55,7 @@ function start() {
         '--disable-dev-shm-usage'
       ],
 
-      // İLERİ AŞAMADA kullancağımız seçenekler (şimdilik kapalı):
+      // İLERİ AŞAMADA kullanabileceğimiz seçenekler (şimdilik kapalı):
       // sessionData: process.env.WA_SESSION_DATA || undefined,
       // sessionDataPath: './session'
     },
@@ -124,7 +122,7 @@ function start() {
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
-    port: PORT,
+    port: String(PORT),
     isAuthenticated,
     qrReady: !!latestQrDataUrl,
     lastQrAgeSeconds: latestQrTimestamp

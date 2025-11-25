@@ -1,19 +1,4 @@
-# Node
-node_modules/
-npm-debug.log*
-.DS_Store
-
-# Session & Cache
+node_modules
+.env
 session/
 .node-persist/
-
-# Environment
-.env
-.env.*
-*.env
-
-# QR Screenshots (wa-automate)
-screenshot_feyz-bot_*.png
-
-# OS Temp
-Thumbs.db
