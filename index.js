@@ -11,7 +11,6 @@ let latestQrTimestamp = null;     // Date.now()
 let isAuthenticated = false;      // true olduğunda QR'a gerek yok
 
 // ---- OpenAI veya başka cevaplama mantığını buraya ekleyeceğiz ---- //
-// Şimdilik sadece test amaçlı TR/DE karışık bir cevap dönüyor:
 async function generateReply(message) {
   return `Merhaba! 👋
 
@@ -26,43 +25,17 @@ Birazdan buraya OpenAI tabanlı TR/DE kurumsal tekstil asistanını bağlayacağ
 function start() {
   console.log('WA client başlatılıyor...');
 
-  create(
-    {
-      sessionId: 'railway-bot',
-      multiDevice: true,
+  create({
+    sessionId: 'railway-bot',
+    multiDevice: true,
 
-      // QR ayarları
-      qrTimeout: 0,           // QR süresiz beklesin, Railway kill etmesin
-      authTimeout: 0,
-      qrLogSkip: true,        // ASCII QR yazdırma (terminalde bozuk görünmesin)
+    // QR ayarları
+    qrTimeout: 0,
+    authTimeout: 0,
+    qrLogSkip: true,
 
-      // Headless Chrome / Railway uyumu
-      headless: true,
-      useChrome: true,
-      killProcessOnBrowserClose: true,
-      cacheEnabled: false,
-      restartOnCrash: start,  // Çökünce tekrar başlat
-
-      chromiumArgs: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--disable-gpu',
-        '--disable-features=site-per-process',
-        '--no-first-run',
-        '--no-zygote',
-        '--single-process',
-        '--disable-dev-shm-usage'
-      ],
-
-      // İLERİ AŞAMADA kullanabileceğimiz ayarlar (şimdilik kapalı):
-      // sessionData: process.env.WA_SESSION_DATA || undefined,
-      // sessionDataPath: './session'
-    },
-
-    // QR CALLBACK → base64 PNG burada geliyor
-    (base64Qr, asciiQR, attempt, urlCode) => {
+    // *** ASIL ÖNEMLİ KISIM: QR CALLBACK BURADA ***
+    qrCallback: (base64Qr, asciiQR, attempt, urlCode) => {
       if (!base64Qr) {
         console.log('QR callback çağrıldı ama base64Qr boş geldi!');
         return;
@@ -73,18 +46,40 @@ function start() {
       isAuthenticated = false;
 
       console.log('Yeni QR üretildi. Deneme:', attempt);
-    }
-  )
+    },
+
+    // Headless Chrome / Railway uyumu
+    headless: true,
+    useChrome: true,
+    killProcessOnBrowserClose: true,
+    cacheEnabled: false,
+    restartOnCrash: start,
+
+    chromiumArgs: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--disable-gpu',
+      '--disable-features=site-per-process',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process',
+      '--disable-dev-shm-usage'
+    ],
+
+    // İLERİ AŞAMADA:
+    // sessionData: process.env.WA_SESSION_DATA || undefined,
+    // sessionDataPath: './session'
+  })
     .then(client => {
       console.log('WA client oluşturuldu ✅');
 
-      // Bağlantı durumu
       client.onStateChanged(state => {
         console.log('WA state değişti →', state);
 
         if (state === 'CONNECTED' || state === 'OPENING' || state === 'NORMAL') {
           isAuthenticated = true;
-          // Artık QR'a gerek yok, hafızadakini silebiliriz
           latestQrDataUrl = null;
           latestQrTimestamp = null;
         }
@@ -94,7 +89,6 @@ function start() {
         }
       });
 
-      // Mesaj yakalama
       client.onMessage(async msg => {
         try {
           const from = msg.from;
@@ -103,14 +97,12 @@ function start() {
           console.log('Mesaj alındı →', from, body);
 
           const reply = await generateReply(body);
-
           await client.sendText(from, reply);
         } catch (err) {
           console.error('Mesaj işlenirken hata:', err);
         }
       });
 
-      // Logout durumunda QR tekrar alınabilsin
       client.onLogout(() => {
         console.log('Kullanıcı logout oldu, yeniden QR beklenecek.');
         isAuthenticated = false;
@@ -123,9 +115,7 @@ function start() {
     });
 }
 
-// ---- HTTP SERVER (Railway burayı görüyor) ---- //
-
-// Sağlık kontrolü
+// ---- HTTP SERVER ---- //
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
@@ -138,9 +128,7 @@ app.get('/', (req, res) => {
   });
 });
 
-// QR endpoint → PNG olarak döner
 app.get('/qr.png', (req, res) => {
-  // Zaten oturum açıksa QR göstermeyelim
   if (isAuthenticated) {
     return res.status(410).send('ALREADY_AUTHENTICATED');
   }
@@ -149,7 +137,6 @@ app.get('/qr.png', (req, res) => {
     return res.status(503).send('QR_NOT_READY');
   }
 
-  // 60 saniyeden eski QR'ları geçersiz say
   const maxAgeMs = 60 * 1000;
   const age = Date.now() - latestQrTimestamp;
 
@@ -158,7 +145,6 @@ app.get('/qr.png', (req, res) => {
     return res.status(410).send('QR_EXPIRED');
   }
 
-  // data:image/png;base64,***** kısmından sadece base64 datasını al
   const base64Data = latestQrDataUrl.split(',')[1];
   const imgBuffer = Buffer.from(base64Data, 'base64');
 
@@ -167,8 +153,7 @@ app.get('/qr.png', (req, res) => {
   res.send(imgBuffer);
 });
 
-// HTTP server'ı başlat, sonra WA client'i ayağa kaldır
 app.listen(PORT, () => {
   console.log(`HTTP server ${PORT} portunda çalışıyor ✅`);
-  start(); // WA client'i başlat
+  start();
 });
