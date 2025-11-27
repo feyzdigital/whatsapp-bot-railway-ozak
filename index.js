@@ -9,32 +9,48 @@ let lastQrTime = 0;
 let isAuthenticated = false;
 
 // -----------------------------
+//  BASİT TEST CEVAP FONKSİYONU
+// -----------------------------
+function buildTestReply(messageBody) {
+  const text = (messageBody || '').trim();
+
+  return (
+    '🧪 *Test Bot Aktif!*\n\n' +
+    (text
+      ? `Gelen mesajın:\n"${text}"\n\n`
+      : 'Bir mesaj gönderdin ama içeriği boş gibi görünüyor.\n\n') +
+    'Bu şu an sadece test yanıtı.\n' +
+    'Kısa süre içinde burayı TR/DE kurumsal tekstil asistanına dönüştüreceğiz. 🤝'
+  );
+}
+
+// -----------------------------
 //  GLOBAL QR EVENT LISTENER
 // -----------------------------
-ev.on("qr.**", (qr, sessionId) => {
-  console.log("🔥 Yeni QR event geldi! Session:", sessionId);
+ev.on('qr.**', (qr, sessionId) => {
+  console.log('🔥 Yeni QR event geldi! Session:', sessionId);
 
-  if (!qr || typeof qr !== "string") {
-    console.log("QR geçersiz.");
+  if (!qr || typeof qr !== 'string') {
+    console.log('QR geçersiz.');
     return;
   }
 
-  // Base64 PNG formatında geliyor → direkt sakla
+  // Genelde "data:image/png;base64,..." formatında geliyor
   latestQrDataUrl = qr;
   lastQrTime = Date.now();
   isAuthenticated = false;
 
-  console.log("QR güncellendi. Uzunluk:", qr.length);
+  console.log('QR güncellendi. Uzunluk:', qr.length);
 });
 
 // -----------------------------
 //  WA CLIENT BAŞLATMA
 // -----------------------------
 function start() {
-  console.log("WA başlatılıyor...");
+  console.log('WA başlatılıyor...');
 
   create({
-    sessionId: "railway-bot",
+    sessionId: 'railway-bot',
     multiDevice: true,
     qrTimeout: 0,
     authTimeout: 0,
@@ -42,15 +58,16 @@ function start() {
     headless: true,
     useChrome: false,
     cacheEnabled: false,
-    restartOnCrash: start,
+    restartOnCrash: start
   })
-    .then((client) => {
-      console.log("WA Client oluşturuldu 🚀");
+    .then(client => {
+      console.log('WA Client oluşturuldu 🚀');
 
-      client.onStateChanged((state) => {
-        console.log("State →", state);
+      // Bağlantı durumu
+      client.onStateChanged(state => {
+        console.log('State →', state);
 
-        if (state === "CONNECTED" || state === "OPENING" || state === "NORMAL") {
+        if (state === 'CONNECTED' || state === 'OPENING' || state === 'NORMAL') {
           isAuthenticated = true;
           latestQrDataUrl = null;
         } else {
@@ -58,49 +75,78 @@ function start() {
         }
       });
 
+      // Çıkış durumunda
       client.onLogout(() => {
-        console.log("Çıkış yapıldı. QR yeniden beklenecek.");
+        console.log('Çıkış yapıldı. QR yeniden beklenecek.');
         isAuthenticated = false;
         latestQrDataUrl = null;
       });
+
+      // -----------------------------
+      //  GELEN MESAJLARA OTOMATİK CEVAP
+      // -----------------------------
+      client.onMessage(async msg => {
+        try {
+          console.log('📩 Yeni mesaj geldi:', {
+            from: msg.from,
+            isGroupMsg: msg.isGroupMsg,
+            body: msg.body
+          });
+
+          // İstersen grup mesajlarını şimdilik es geçelim
+          if (msg.isGroupMsg) {
+            console.log('Grup mesajı, cevaplanmayacak.');
+            return;
+          }
+
+          const replyText = buildTestReply(msg.body);
+
+          await client.sendText(msg.from, replyText);
+
+          console.log('✅ Mesaja cevap gönderildi:', msg.from);
+        } catch (err) {
+          console.error('Mesaj işlenirken hata:', err);
+        }
+      });
     })
-    .catch((err) => console.error("WA hata:", err));
+    .catch(err => {
+      console.error('WA hata:', err);
+    });
 }
 
 // -----------------------------
 //  ROOT ENDPOINT
 // -----------------------------
-app.get("/", (req, res) => {
+app.get('/', (req, res) => {
   res.json({
-    status: "ok",
+    status: 'ok',
     streamMode: true,
     isAuthenticated,
     qrTimestamp: lastQrTime,
-    qrAgeSeconds: lastQrTime ? Math.round((Date.now() - lastQrTime) / 1000) : null
+    qrAgeSeconds: lastQrTime
+      ? Math.round((Date.now() - lastQrTime) / 1000)
+      : null
   });
 });
 
 // -----------------------------
 //  QR STREAM ENDPOINT (HER ZAMAN GÜNCEL QR)
 // -----------------------------
-app.get("/qr.png", (req, res) => {
-  res.setHeader("Cache-Control", "no-store, must-revalidate");
+app.get('/qr.png', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, must-revalidate');
 
-  // Zaten giriş yapıldıysa QR gerekmez
   if (isAuthenticated) {
-    return res.status(200).send("ALREADY_AUTHENTICATED");
+    return res.status(200).send('ALREADY_AUTHENTICATED');
   }
 
-  // QR henüz yok → 1 saniye sonra yenile
   if (!latestQrDataUrl) {
-    return res.status(503).send("QR_NOT_READY");
+    return res.status(503).send('QR_NOT_READY');
   }
 
-  // PNG base64 formatından ayıkla → gönder
-  const base64 = latestQrDataUrl.replace(/^data:image\/png;base64,/, "");
-  const buffer = Buffer.from(base64, "base64");
+  const base64 = latestQrDataUrl.replace(/^data:image\/png;base64,/, '');
+  const buffer = Buffer.from(base64, 'base64');
 
-  res.setHeader("Content-Type", "image/png");
+  res.setHeader('Content-Type', 'image/png');
   res.send(buffer);
 });
 
@@ -108,6 +154,6 @@ app.get("/qr.png", (req, res) => {
 //  SERVER + WA CLIENT BAŞLAT
 // -----------------------------
 app.listen(PORT, () => {
-  console.log("HTTP server çalışıyor:", PORT);
+  console.log('HTTP server çalışıyor:', PORT);
   start();
 });
