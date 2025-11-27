@@ -22,26 +22,26 @@ Birazdan buraya OpenAI tabanlı TR/DE kurumsal tekstil asistanını bağlayacağ
 function start() {
   console.log('WA client başlatılıyor...');
 
-  create(
-    {
-      sessionId: 'railway-bot',
-      multiDevice: true,
+  create({
+    sessionId: 'railway-bot',
+    multiDevice: true,
 
-      qrTimeout: 0,
-      authTimeout: 0,
-      qrLogSkip: true,
+    // QR ayarları
+    qrTimeout: 0,
+    authTimeout: 0,
+    qrLogSkip: true,
 
-      headless: true,
-      useChrome: false,
-      cacheEnabled: false,
-      restartOnCrash: start
-    },
+    headless: true,
+    useChrome: false,
+    cacheEnabled: false,
+    restartOnCrash: start,
 
-    // QR CALLBACK
-    async (base64Qr, asciiQR, attempt, urlCode) => {
+    // 🔥 ASIL ÖNEMLİ KISIM: QR CALLBACK CONFIG İÇİNDE
+    qrCallback: async (base64Qr, asciiQR, attempt, urlCode) => {
       console.log('qrCallback tetiklendi. attempt:', attempt);
 
       try {
+        // 1) OpenWA base64 PNG veriyorsa doğrudan kullan
         if (base64Qr && typeof base64Qr === 'string' && base64Qr.startsWith('data:image')) {
           latestQrDataUrl = base64Qr;
           latestQrTimestamp = Date.now();
@@ -50,6 +50,7 @@ function start() {
           return;
         }
 
+        // 2) Aksi halde urlCode'dan kendi PNG'mizi üret
         if (urlCode && typeof urlCode === 'string') {
           console.log('base64Qr yok, urlCode ile PNG üretiliyor...');
           const dataUrl = await QRCode.toDataURL(urlCode, {
@@ -58,7 +59,7 @@ function start() {
             scale: 8
           });
 
-          latestQrDataUrl = dataUrl;
+          latestQrDataUrl = dataUrl; // data:image/png;base64,...
           latestQrTimestamp = Date.now();
           isAuthenticated = false;
           console.log('QR PNG, qrcode kütüphanesi ile üretildi.');
@@ -73,7 +74,7 @@ function start() {
         console.error('qrCallback içinde hata:', err);
       }
     }
-  )
+  })
     .then(client => {
       console.log('WA client oluşturuldu ✅');
 
