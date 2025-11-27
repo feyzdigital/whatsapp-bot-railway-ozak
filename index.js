@@ -1,6 +1,5 @@
-const { create } = require('@open-wa/wa-automate');
+const { create, ev } = require('@open-wa/wa-automate');
 const express = require('express');
-const QRCode = require('qrcode');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -14,6 +13,34 @@ async function generateReply(message) {
   return `Mesajını aldım: "${message}"`;
 }
 
+// 🔥 GLOBAL QR EVENT LISTENER (create'den bağımsız, tek sefer)
+ev.on('qr.**', async (qrcode, sessionId) => {
+  try {
+    console.log('ev qr.** event tetiklendi! sessionId:', sessionId);
+    console.log('qrcode type/len:', typeof qrcode, qrcode ? qrcode.length : null);
+
+    if (!qrcode || typeof qrcode !== 'string') {
+      console.log('ev qr.**: qrcode string değil, işlem yapılmadı.');
+      return;
+    }
+
+    // qrcode zaten "data:image/png;base64,..." formatında geliyor
+    if (qrcode.startsWith('data:image')) {
+      latestQrDataUrl = qrcode;
+      latestQrTimestamp = Date.now();
+      isAuthenticated = false;
+      console.log('ev qr.**: dataURL hafızaya kaydedildi.');
+    } else {
+      console.log('ev qr.**: Beklenen dataURL formatı değil, yine de saklanıyor.');
+      latestQrDataUrl = qrcode;
+      latestQrTimestamp = Date.now();
+      isAuthenticated = false;
+    }
+  } catch (err) {
+    console.error('ev qr.** içinde hata:', err);
+  }
+});
+
 function start() {
   console.log('WA client başlatılıyor...');
 
@@ -21,69 +48,14 @@ function start() {
     sessionId: 'railway-bot',
     multiDevice: true,
 
-    // QR ayarları
     qrTimeout: 0,
     authTimeout: 0,
-    qrLogSkip: false, // ASCII QR'ı logda da görelim
+    qrLogSkip: false, // ASCII QR logda görünsün
 
     headless: true,
     useChrome: false,
     cacheEnabled: false,
-    restartOnCrash: start,
-
-    // 🔥 ASIL ÖNEMLİ KISIM: qrCallback CONFIG İÇİNDE
-    qrCallback: async (qrArg1, qrArg2, qrArg3, qrArg4) => {
-      console.log('qrCallback tetiklendi!');
-      console.log('qrCallback arg1 type/len:', typeof qrArg1, qrArg1 ? qrArg1.length : null);
-      console.log('qrCallback arg2 type/len:', typeof qrArg2, qrArg2 ? qrArg2.length : null);
-      console.log('qrCallback arg3 type/val:', typeof qrArg3, qrArg3);
-      console.log('qrCallback arg4 type/len:', typeof qrArg4, qrArg4 ? qrArg4.length : null);
-
-      try {
-        let source = null;
-
-        // Sırayla hangi argüman kullanılabilir bakıyoruz
-        if (qrArg4 && typeof qrArg4 === 'string') {
-          // Çoğu MD sürümünde urlCode burada geliyor
-          console.log('qrCallback: urlCode (arg4) kullanılıyor.');
-          source = qrArg4;
-        } else if (qrArg1 && typeof qrArg1 === 'string') {
-          console.log('qrCallback: arg1 kullanılıyor.');
-          source = qrArg1;
-        } else if (qrArg2 && typeof qrArg2 === 'string') {
-          console.log('qrCallback: arg2 kullanılıyor.');
-          source = qrArg2;
-        }
-
-        if (!source) {
-          console.log('qrCallback: kullanılabilir QR kaynağı bulunamadı.');
-          return;
-        }
-
-        // Eğer zaten data:image ile başlıyorsa direkt al
-        if (source.startsWith('data:image')) {
-          latestQrDataUrl = source;
-          latestQrTimestamp = Date.now();
-          isAuthenticated = false;
-          console.log('qrCallback: dataURL direkt kaydedildi.');
-          return;
-        }
-
-        // Değilse qrcode kütüphanesiyle PNG üret
-        const dataUrl = await QRCode.toDataURL(source, {
-          errorCorrectionLevel: 'M',
-          margin: 2,
-          scale: 8
-        });
-
-        latestQrDataUrl = dataUrl;
-        latestQrTimestamp = Date.now();
-        isAuthenticated = false;
-        console.log('qrCallback: QR PNG üretildi ve hafızaya kaydedildi.');
-      } catch (err) {
-        console.error('qrCallback içinde hata:', err);
-      }
-    }
+    restartOnCrash: start
   })
     .then(client => {
       console.log('WA client oluşturuldu ✅');
@@ -153,7 +125,15 @@ app.get('/qr.png', (req, res) => {
     return res.status(410).send('QR_EXPIRED');
   }
 
-  const base64Data = latestQrDataUrl.split(',')[1];
+  let base64Data;
+
+  if (latestQrDataUrl.startsWith('data:image')) {
+    base64Data = latestQrDataUrl.split(',')[1];
+  } else {
+    // Her ihtimale karşı: saf base64 ise
+    base64Data = latestQrDataUrl;
+  }
+
   const imgBuffer = Buffer.from(base64Data, 'base64');
 
   res.setHeader('Content-Type', 'image/png');
