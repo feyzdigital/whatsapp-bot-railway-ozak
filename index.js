@@ -4,9 +4,12 @@ const express = require('express');
 const app = express();
 const PORT = process.env.PORT || 8080;
 
+// Runtime durum değişkenleri
 let latestQrDataUrl = null;
 let lastQrTime = 0;
 let isAuthenticated = false;
+let hostNumber = null;         // Bağlı hattın numarası
+let clientReady = false;       // OpenWA tamamen hazır mı?
 
 // -----------------------------
 //  BASİT TEST CEVAP FONKSİYONU
@@ -39,6 +42,7 @@ ev.on('qr.**', (qr, sessionId) => {
   latestQrDataUrl = qr;
   lastQrTime = Date.now();
   isAuthenticated = false;
+  clientReady = false;
 
   console.log('QR güncellendi. Uzunluk:', qr.length);
 });
@@ -52,64 +56,87 @@ function start() {
   create({
     sessionId: 'railway-bot',
     multiDevice: true,
-    qrTimeout: 0,
-    authTimeout: 0,
-    qrLogSkip: false,
+    qrTimeout: 0,          // QR süresiz
+    authTimeout: 0,        // Auth süresiz
+    qrLogSkip: false,      // ASCII QR loglansın (yedek plan)
     headless: true,
     useChrome: false,
     cacheEnabled: false,
     restartOnCrash: start
   })
-    .then(client => {
+    .then(async (client) => {
       console.log('WA Client oluşturuldu 🚀');
 
-      // Bağlantı durumu
-      client.onStateChanged(state => {
-        console.log('State →', state);
+      // Global referans (HTTP endpointlerden erişmek için)
+      global.waClient = client;
+
+      // 👉 Bağlı numarayı öğren
+      try {
+        hostNumber = await client.getHostNumber();
+        console.log('📌 BAĞLANAN WHATSAPP NUMARASI:', hostNumber);
+      } catch (err) {
+        console.error('❌ Host numarası alınamadı:', err);
+      }
+
+      // İstemci tamamen hazır olduğunda (mesaj dinleme, vs.)
+      client.onStateChanged((state) => {
+        console.log('⚙️ State →', state);
 
         if (state === 'CONNECTED' || state === 'OPENING' || state === 'NORMAL') {
           isAuthenticated = true;
-          latestQrDataUrl = null;
         } else {
           isAuthenticated = false;
         }
       });
 
-      // Çıkış durumunda
       client.onLogout(() => {
-        console.log('Çıkış yapıldı. QR yeniden beklenecek.');
+        console.log('🚪 Çıkış yapıldı. QR yeniden beklenecek.');
         isAuthenticated = false;
+        clientReady = false;
         latestQrDataUrl = null;
+      });
+
+      // Genel hazır olma eventi
+      client.onAnyMessage((msg) => {
+        if (!clientReady) {
+          console.log('✅ İlk mesaj alındı, clientReady = true');
+          clientReady = true;
+        }
+
+        console.log('📨 onAnyMessage tetiklendi:', {
+          from: msg.from,
+          isGroupMsg: msg.isGroupMsg,
+          body: msg.body
+        });
       });
 
       // -----------------------------
       //  GELEN MESAJLARA OTOMATİK CEVAP
       // -----------------------------
-      client.onMessage(async msg => {
+      client.onMessage(async (msg) => {
         try {
-          console.log('📩 Yeni mesaj geldi:', {
+          console.log('📩 Yeni mesaj geldi (onMessage):', {
             from: msg.from,
             isGroupMsg: msg.isGroupMsg,
             body: msg.body
           });
 
-          // İstersen grup mesajlarını şimdilik es geçelim
+          // Grup mesajlarını şimdilik pas geçelim
           if (msg.isGroupMsg) {
-            console.log('Grup mesajı, cevaplanmayacak.');
+            console.log('➡️ Grup mesajı, cevaplanmayacak.');
             return;
           }
 
           const replyText = buildTestReply(msg.body);
-
           await client.sendText(msg.from, replyText);
 
           console.log('✅ Mesaja cevap gönderildi:', msg.from);
         } catch (err) {
-          console.error('Mesaj işlenirken hata:', err);
+          console.error('❌ Mesaj işlenirken hata:', err);
         }
       });
     })
-    .catch(err => {
+    .catch((err) => {
       console.error('WA hata:', err);
     });
 }
@@ -120,13 +147,36 @@ function start() {
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
-    streamMode: true,
+    port: PORT.toString(),
     isAuthenticated,
-    qrTimestamp: lastQrTime,
-    qrAgeSeconds: lastQrTime
+    clientReady,
+    hostNumber,
+    qrReady: !!latestQrDataUrl,
+    lastQrAgeSeconds: lastQrTime
       ? Math.round((Date.now() - lastQrTime) / 1000)
       : null
   });
+});
+
+// -----------------------------
+//  BAĞLI NUMARAYI DIŞARIYA VEREN ENDPOINT
+// -----------------------------
+app.get('/me', async (req, res) => {
+  try {
+    if (!global.waClient) {
+      return res.status(503).json({ error: 'CLIENT_NOT_READY' });
+    }
+
+    const num = await global.waClient.getHostNumber();
+    return res.json({
+      number: num,
+      isAuthenticated,
+      clientReady
+    });
+  } catch (err) {
+    console.error('❌ /me endpoint hatası:', err);
+    return res.status(500).json({ error: err.toString() });
+  }
 });
 
 // -----------------------------
