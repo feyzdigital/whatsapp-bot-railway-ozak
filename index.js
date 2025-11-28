@@ -1,314 +1,496 @@
+// index.js
+// Ozak Textile & Pack – WhatsApp satış asistanı (TR/DE/EN, doğal diyalog, soru odaklı)
+
+// -----------------------------
+//  DEPENDENCIES
+// -----------------------------
 const { create, ev } = require('@open-wa/wa-automate');
 const express = require('express');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 
+// -----------------------------
+//  QR TAKİBİ (RAILWAY)
+// -----------------------------
 let latestQrDataUrl = null;
 let lastQrTime = 0;
 let isAuthenticated = false;
 
-// ----------------------------------------------------
-//  DİL ALGILAMA (TR / DE / EN)
-// ----------------------------------------------------
-function detectLanguage(messageBody) {
-  const text = (messageBody || '').toLowerCase();
+// Kullanıcı bazlı hafif state (sadece RAM’de, container resetlenirse sıfırlanır)
+const sessions = new Map(); // key: chatId (msg.from), value: { lang, step, lastInteraction }
 
-  const hasTrChars = /[ığüşöçİĞÜŞÖÇ]/.test(messageBody || '');
+// -----------------------------
+//  YARDIMCI FONKSİYONLAR
+// -----------------------------
 
-  // Basit kelime bazlı algılama
-  if (
-    hasTrChars ||
-    /(merhaba|selam|fiyat|adet|otel|restoran|lokanta|kafe|broşür|katalog)/.test(
-      text
-    )
-  ) {
-    return 'tr';
-  }
+function detectLanguage(text) {
+  const t = (text || '').toLowerCase();
 
-  if (
-    /(hallo|guten tag|guten morgen|angebot|preis|stück|stickerei|servietten|schürze|tischwäsche|hotellerie)/.test(
-      text
-    )
-  ) {
-    return 'de';
-  }
+  const hasTrChars = /[çğıöşü]/.test(t);
+  const hasDeChars = /[äöüß]/.test(t);
 
-  if (
-    /(hello|hi |good morning|good afternoon|price|quotation|napkin|apron|towel|hotel|restaurant|cafe|catalog)/.test(
-      text
-    )
-  ) {
-    return 'en';
-  }
+  const trWords = ['merhaba', 'selam', 'günaydın', 'iyi akşam', 'teşekkür', 'otel', 'restoran', 'kafe', 'fiyat', 'adet'];
+  const deWords = ['hallo', 'guten', 'danke', 'gastronomie', 'preis', 'stück', 'servietten', 'textil'];
+  const enWords = ['hello', 'hi ', 'good morning', 'good evening', 'thanks', 'price', 'pieces', 'textile'];
 
-  // Hiçbirine uymuyorsa: varsayılan Türkçe
+  let scoreTr = hasTrChars ? 2 : 0;
+  let scoreDe = hasDeChars ? 2 : 0;
+  let scoreEn = 0;
+
+  trWords.forEach(w => { if (t.includes(w)) scoreTr++; });
+  deWords.forEach(w => { if (t.includes(w)) scoreDe++; });
+  enWords.forEach(w => { if (t.includes(w)) scoreEn++; });
+
+  if (scoreTr >= scoreDe && scoreTr >= scoreEn && scoreTr > 0) return 'tr';
+  if (scoreDe >= scoreTr && scoreDe >= scoreEn && scoreDe > 0) return 'de';
+  if (scoreEn >= scoreTr && scoreEn >= scoreDe && scoreEn > 0) return 'en';
+
+  // Çok belirsizse default Türkçe
   return 'tr';
 }
 
-// ----------------------------------------------------
-//  ÜRÜN / İHTİYAÇ TİPİ ALGILAMA (çok kaba)
-// ----------------------------------------------------
-function detectInterest(messageBody) {
-  const text = (messageBody || '').toLowerCase();
-
-  if (/(önlük|schürze|apron)/.test(text)) return 'apron';
-  if (/(peçete|serviette|servietten|napkin)/.test(text)) return 'napkin';
-  if (/(masa örtüsü|tischdecke|tablecloth)/.test(text)) return 'tablecloth';
-  if (/(amerikan servis|placemat)/.test(text)) return 'placemat';
-  if (/(havlu|towel|handtuch)/.test(text)) return 'towel';
-  if (/(baskı|print|druck)/.test(text)) return 'print';
-  if (/(nakış|embroidery|stickerei)/.test(text)) return 'embroidery';
-  if (/(ambalaj|paket|package|verpackung|disposable)/.test(text)) return 'packaging';
-
-  return 'generic';
+function getOrCreateSession(chatId, incomingText) {
+  let s = sessions.get(chatId);
+  if (!s) {
+    s = {
+      lang: detectLanguage(incomingText),
+      step: 0,
+      lastInteraction: Date.now()
+    };
+    sessions.set(chatId, s);
+  } else {
+    const newLang = detectLanguage(incomingText);
+    if (newLang && newLang !== s.lang) {
+      s.lang = newLang;
+    }
+    s.lastInteraction = Date.now();
+  }
+  return s;
 }
 
-// ----------------------------------------------------
-//  FİYAT SORULARINI YAKALA (ama fiyat VERME)
-// ----------------------------------------------------
-function isPriceQuestion(messageBody) {
-  const text = (messageBody || '').toLowerCase();
+function randomDelay(minMs = 2000, maxMs = 5000) {
+  return minMs + Math.floor(Math.random() * (maxMs - minMs));
+}
+
+async function sendWithDelay(client, to, text) {
+  const delay = randomDelay();
+  console.log(`✉️  ${to} numarasına ${delay} ms gecikmeyle cevap gönderilecek.`);
+  setTimeout(() => {
+    client
+      .sendText(to, text)
+      .then(() => console.log('✅ Mesaj gönderildi →', to))
+      .catch(err => console.error('Mesaj gönderilemedi:', err));
+  }, delay);
+}
+
+// -----------------------------
+//  ASIL CEVAP ÜRETEN FONKSİYON
+// -----------------------------
+function buildSmartReply({ lang, text, step }) {
+  const t = (text || '').toLowerCase();
+
+  const isQuestion =
+    t.includes('?') ||
+    ['mısın', 'misin', 'musun', 'müsün', 'mi ', ' mı ', ' mu ', ' mü '].some(w => t.includes(w)) ||
+    [' what ', ' how ', ' wer ', ' wie '].some(w => t.includes(w));
+
+  const asksPrice =
+    ['fiyat', 'ücret', 'tl', 'euro', '€, eur', 'eur', 'preis', 'kosten', 'price', 'cost'].some(w =>
+      t.includes(w)
+    );
+
+  const asksDelivery =
+    ['teslim', 'kargo', 'shipping', 'lieferzeit', 'kaç günde', 'ne kadar sürede', 'kaç gün'].some(w =>
+      t.includes(w)
+    );
+
+  const asksWho =
+    ['kimsin', 'siz kimsiniz', 'kimle görüşüyorum', 'kimle konuşuyorum', 'hangi firmasınız', 'firma ismi', 'firma adı', 'who are you', 'who am i talking', 'wer sind sie', 'mit wem'].some(w =>
+      t.includes(w)
+    );
+
+  const asksLocation =
+    ['neredesiniz', 'hangi ülkede', 'hangi ulke', 'adres', 'nereye bağlı', 'where are you', 'where do you ship from', 'wo sitzen sie', 'standort'].some(w =>
+      t.includes(w)
+    );
+
+  const asksMOQ =
+    ['minimum', 'min.', 'en az kaç', 'en az kac', 'moq', 'mindestens', 'minimum order', 'min order'].some(w =>
+      t.includes(w)
+    );
+
+  const saysThanks =
+    ['teşekkür', 'tesekkur', 'sağol', 'sagol', 'danke', 'thank you', 'thanks', 'thx'].some(w =>
+      t.includes(w)
+    );
+
+  const smallTalk =
+    ['nasılsın', 'nasilsin', 'iyisiniz', 'wie geht', 'how are you'].some(w => t.includes(w));
+
+  const looksLikeGreeting =
+    ['merhaba', 'selam', 'günaydın', 'iyi akşam', 'hallo', 'hello', 'good morning', 'guten tag', 'servus', 'hi ']
+      .some(w => t.includes(w));
+
+  const mentionsHotel = ['otel', 'hotel'].some(w => t.includes(w));
+  const mentionsRestaurant = ['restoran', 'restaurant', 'lokanta', 'cafe', 'kafe', 'bistro'].some(w =>
+    t.includes(w)
+  );
+  const mentionsTextile =
+    ['peçete', 'servis', 'masa örtüsü', 'masa ortusu', 'havlu', 'bornoz', 'önlük', 'apron', 'uniforma', 'nevresim', 'çarşaf', 'carsaf', 'textile', 'textil', 'serviette', 'servietten']
+      .some(w => t.includes(w));
+
+  const productHints = {
+    tr:
+      'Otel, restoran ve tüm işletmeler için;\n' +
+      '• Nakışlı / baskılı önlük ve çalışan kıyafetleri\n' +
+      '• Peçete, runner ve masa örtüsü\n' +
+      '• Oda tekstili (havlu, bornoz, nevresim vb.)\n' +
+      '• Tek kullanımlık ürünler (peçete, sleeve, bardak altlığı vb.)',
+    de:
+      'Für Hotels, Restaurants und alle Betriebe bieten wir u.a.:\n' +
+      '• Bestickte / bedruckte Schürzen und Berufsbekleidung\n' +
+      '• Stoffservietten, Läufer und Tischdecken\n' +
+      '• Zimmertextilien (Handtücher, Bademäntel, Bettwäsche usw.)\n' +
+      '• Einwegprodukte (Servietten, Sleeves, Untersetzer usw.)',
+    en:
+      'For hotels, restaurants and all businesses we offer for example:\n' +
+      '• Embroidered / printed aprons and staff wear\n' +
+      '• Napkins, runners and tablecloths\n' +
+      '• Room textiles (towels, bathrobes, bed linen etc.)\n' +
+      '• Disposable products (napkins, sleeves, coasters etc.)'
+  };
+
+  // -----------------------------
+  // 1) Kimle konuşuyoruz? (bot değil satışçı gibi)
+  // -----------------------------
+  if (asksWho) {
+    if (lang === 'de') {
+      return (
+        'Burada Ozak Textile & Pack satış ekibi olarak yazıyoruz. 😊\n' +
+        'Gastronomie-Textilien und Einwegprodukte ile ilgili ihtiyaçlarınız için size eşlik ediyoruz.\n' +
+        'Kısaca işletmenizi ve öncelikli ürün ihtiyacınızı yazarsanız, noktaya atış önerilerle ilerleyelim.'
+      );
+    }
+    if (lang === 'en') {
+      return (
+        'You are in contact with the sales team of Ozak Textile & Pack. 😊\n' +
+        'We support you with textile and disposable solutions for your business.\n' +
+        'If you briefly tell me about your business and priority products, we can move very precisely.'
+      );
+    }
+    return (
+      'Burada Ozak Textile & Pack satış ekibi olarak size yardımcı oluyoruz. 😊\n' +
+      'İşletmeniz için tekstil ve tek kullanımlık ürün çözümlerini birlikte planlıyoruz.\n' +
+      'Kısaca işletmenizi ve öncelikli ürün ihtiyacınızı yazarsanız, tam size göre bir yönlendirme yapabilirim.'
+    );
+  }
+
+  // -----------------------------
+  // 2) Lokasyon soruları
+  // -----------------------------
+  if (asksLocation) {
+    if (lang === 'de') {
+      return (
+        'Ozak Textile & Pack olarak Türkiye merkezli üretim yapıyoruz ve Avrupa’daki birçok işletmeye sevkiyat sağlıyoruz. 🌍\n' +
+        'Siparişlerinizde hizmet verdiğiniz ülke ve şehir bilgisiyle birlikte ürün ve adet detayını paylaşırsanız, size özel çözümü netleştirebiliriz.'
+      );
+    }
+    if (lang === 'en') {
+      return (
+        'Ozak Textile & Pack is based in Turkey and we supply many businesses across Europe. 🌍\n' +
+        'If you share your country/city together with product and quantity details, we can clarify the best solution for you.'
+      );
+    }
+    return (
+      'Ozak Textile & Pack olarak Türkiye merkezli üretim yapıyoruz ve Avrupa’daki birçok işletmeye sevkiyat sağlıyoruz. 🌍\n' +
+      'Siz hangi ülke/şehirde hizmet veriyorsunuz? Buna göre ürün ve lojistik tarafını birlikte netleştirebiliriz.'
+    );
+  }
+
+  // -----------------------------
+  // 3) Teşekkür ve small talk
+  // -----------------------------
+  if (saysThanks && !asksPrice && !asksDelivery && !isQuestion) {
+    if (lang === 'de') {
+      return (
+        'Rica ederim, memnuniyetle. 🙏\n' +
+        'Şimdi isterseniz adım adım ilerleyelim: Öncelikle hangi ürün grubuna odaklanmak istersiniz?'
+      );
+    }
+    if (lang === 'en') {
+      return (
+        'You’re very welcome. 🙏\n' +
+        'If you like, we can move step by step now: which product group would you like to focus on first?'
+      );
+    }
+    return (
+      'Rica ederim, ne demek. 🙏\n' +
+      'İsterseniz şimdi adım adım ilerleyelim: Öncelikle hangi ürün grubuna odaklanmak istersiniz?'
+    );
+  }
+
+  if (smallTalk) {
+    if (lang === 'de') {
+      return (
+        'Teşekkür ederim, her şey yolunda. ☺️\n' +
+        'Sizin için de işler yolundaysa, işletmenize en çok değer katacak tekstil veya tek kullanımlık ürün grubundan başlayalım mı?'
+      );
+    }
+    if (lang === 'en') {
+      return (
+        'Thank you, doing well. ☺️\n' +
+        'If you are ready too, let’s start with the product group that will add the most value to your business.'
+      );
+    }
+    return (
+      'Teşekkür ederim, her şey yolunda. ☺️\n' +
+      'Sizin için de uygunsa, işletmenize en çok değer katacak ürün grubundan başlayalım mı?'
+    );
+  }
+
+  // -----------------------------
+  // 4) İlk temas / selamlama (step 0-1)
+  // -----------------------------
+  if (step === 0 || (looksLikeGreeting && step <= 1)) {
+    if (lang === 'de') {
+      return (
+        'Merhaba, Ozak Textile & Pack’e hoş geldiniz. 👋\n' +
+        'Hotel, Restaurant, Café, Catering ve daha birçok işletme için tekstil ve Einweg-Lösungen üretiyoruz.\n\n' +
+        productHints.de +
+        '\n\n' +
+        'Kısaca işletmenizi ve öncelikli ürün ihtiyacınızı yazarsanız, oradan devam edelim.'
+      );
+    }
+    if (lang === 'en') {
+      return (
+        'Hello, welcome to Ozak Textile & Pack. 👋\n' +
+        'We produce textile and disposable solutions for hotels, restaurants, cafés, catering and many other businesses.\n\n' +
+        productHints.en +
+        '\n\n' +
+        'If you briefly describe your business and your priority product group, we can continue from there.'
+      );
+    }
+    return (
+      'Merhaba, Ozak Textile & Pack’e hoş geldiniz. 👋\n' +
+      'Otel, restoran, kafe, catering ve pek çok farklı işletme için tekstil ve tek kullanımlık ürünler üretiyoruz.\n\n' +
+      productHints.tr +
+      '\n\n' +
+      'Kısaca işletmenizi ve öncelikli ürün ihtiyacınızı yazarsanız, buradan devam edelim.'
+    );
+  }
+
+  // -----------------------------
+  // 5) Fiyat soruları (rakam yok, EUR ve süreç)
+  // -----------------------------
+  if (asksPrice) {
+    if (lang === 'de') {
+      return (
+        'Fiyatlandırmayı ürün tipi, malzeme, baskı/nakış detayı ve adet üzerinden proje bazlı hazırlıyoruz ve tekliflerimizi EUR olarak çalışıyoruz. 💶\n\n' +
+        'Sizin için net bir Angebot çıkarabilmemiz için lütfen şunlardan birkaçını yazın:\n' +
+        '• Hangi ürün(ler)? (örn. Schürzen, Servietten, Tischwäsche, Handtücher…)\n' +
+        '• Logolu mu, kaç renk baskı veya nakış düşünüyorsunuz?\n' +
+        '• Tahmini adet veya yıllık tüketim\n\n' +
+        'Bu bilgilerle size özel, yazılı bir teklif hazırlayalım.'
+      );
+    }
+    if (lang === 'en') {
+      return (
+        'Pricing depends on product type, material, print/embroidery details and quantity. We prepare all offers in EUR. 💶\n\n' +
+        'To prepare a clear quotation for you, please share:\n' +
+        '• Which products? (e.g. aprons, napkins, tablecloths, towels…)\n' +
+        '• Logo and print/embroidery details (number of colours etc.)\n' +
+        '• Approximate quantity or yearly consumption\n\n' +
+        'With these details we will prepare a tailored written offer.'
+      );
+    }
+    return (
+      'Fiyatlarımızı ürün tipi, malzeme, baskı/nakış detayı ve adet üzerinden, proje bazlı ve EUR cinsinden hazırlıyoruz. 💶\n\n' +
+      'Sizin için net bir teklif çıkarabilmemiz için lütfen şu bilgileri kısaca paylaşın:\n' +
+      '• Hangi ürün(ler)? (örneğin önlük, personel kıyafeti, peçete, masa örtüsü, havlu, bornoz vb.)\n' +
+      '• Logolu mu olacak, kaç renk baskı veya nakış düşünüyorsunuz?\n' +
+      '• Tahmini adet veya yıllık tüketim\n\n' +
+      'Bu bilgilerle size özel, yazılı bir teklif hazırlayalım.'
+    );
+  }
+
+  // -----------------------------
+  // 6) Teslim / kargo soruları (net süre yok)
+  // -----------------------------
+  if (asksDelivery) {
+    if (lang === 'de') {
+      return (
+        'Lieferzeit ve üretim süresi; ürün tipi, baskı/nakış detayı ve adet miktarına göre değişiyor. 📦\n' +
+        'Buradan net bir gün söylemek yerine, önce projenizin detaylarını alıp size özel planlamayı paylaşmak daha sağlıklı olur.\n\n' +
+        'Kısaca ürün, adet ve ülke/şehir bilgisini yazarsanız, en uygun üretim ve sevkiyat planını sizin için oluşturabiliriz.'
+      );
+    }
+    if (lang === 'en') {
+      return (
+        'Production and delivery times depend on product type, print/embroidery details and quantity. 📦\n' +
+        'Instead of giving a random number of days, we prefer to first understand your project and then share a realistic timeline.\n\n' +
+        'If you send product, quantity and country/city info, we can plan the best possible schedule for you.'
+      );
+    }
+    return (
+      'Teslim süresi; ürün tipi, baskı/nakış detayı ve adet miktarına göre değişiyor. 📦\n' +
+      'Buradan net bir gün vermek yerine, önce projenizi anlayıp size özel gerçekçi bir plan paylaşmak daha doğru olur.\n\n' +
+      'Kısaca ürün, adet ve bulunduğunuz ülke/şehir bilgisini yazarsanız, sizin için en uygun üretim ve sevkiyat planını çıkarabiliriz.'
+    );
+  }
+
+  // -----------------------------
+  // 7) Minimum adet / MOQ
+  // -----------------------------
+  if (asksMOQ) {
+    if (lang === 'de') {
+      return (
+        'Minimum adetlerimiz ürün grubuna ve baskı/nakış detayına göre değişiyor. 🎯\n' +
+        'Bazı ürünlerde daha esnek, bazı ürünlerde ise belirli bir alt sınırla çalışıyoruz.\n\n' +
+        'Siz hangi ürün için, yaklaşık kaç adet düşünüyorsunuz? Buna göre minimum ve avantajlı adetler konusunda net bilgi verebilirim.'
+      );
+    }
+    if (lang === 'en') {
+      return (
+        'Our minimum quantities depend on the product group and the print/embroidery details. 🎯\n' +
+        'For some items we are more flexible, for others we work with certain MOQ levels.\n\n' +
+        'Which product are you considering and roughly how many pieces? Then I can clarify the minimum and the most economical quantity for you.'
+      );
+    }
+    return (
+      'Minimum adetlerimiz ürün grubuna ve baskı/nakış detayına göre değişiyor. 🎯\n' +
+      'Bazı ürünlerde daha esnek, bazı ürünlerde ise belirli bir alt sınırla çalışıyoruz.\n\n' +
+      'Siz hangi ürün için ve yaklaşık kaç adet düşünüyorsunuz? Buna göre hem minimum adet hem de en avantajlı adetler konusunda net bilgi verebilirim.'
+    );
+  }
+
+  // -----------------------------
+  // 8) İşletme tipi belirtilmişse
+  // -----------------------------
+  if (mentionsHotel || mentionsRestaurant) {
+    if (lang === 'de') {
+      return (
+        'Anladım, teşekkürler. 🙏\n' +
+        'Bu tür işletmeler için en çok çalıştığımız ürünler:\n' +
+        '• Logolu çalışan kıyafetleri ve Schürzen\n' +
+        '• Stoffservietten, Tischläufer ve Tischdecken\n' +
+        '• Zimmertextilien (Handtücher, Bademäntel, Bettwäsche)\n\n' +
+        'İsterseniz önce personel tarafı mı, masa tekstili mi yoksa oda tekstili mi sizin için daha kritik, onu netleştirelim.'
+      );
+    }
+    if (lang === 'en') {
+      return (
+        'Got it, thank you. 🙏\n' +
+        'For this type of business we usually focus on:\n' +
+        '• Branded staff wear and aprons\n' +
+        '• Table textiles (napkins, runners, tablecloths)\n' +
+        '• Room textiles (towels, bathrobes, bed linen)\n\n' +
+        'Which area is more important for you right now: staff, table, or room textiles?'
+      );
+    }
+    return (
+      'Harika, teşekkürler. 🙏\n' +
+      'Bu tür işletmeler için en çok öne çıkan ürünlerimiz:\n' +
+      '• Logolu personel kıyafetleri ve önlükler\n' +
+      '• Peçete, runner ve masa örtüsü gibi masa tekstilleri\n' +
+      '• Havlu, bornoz, nevresim gibi oda tekstilleri\n\n' +
+      'Şu anda sizin için hangisi daha öncelikli: personel, masa mı yoksa oda tekstili mi?'
+    );
+  }
+
+  // -----------------------------
+  // 9) Ürün belirtilmiş ama detay azsa
+  // -----------------------------
+  if (mentionsTextile) {
+    if (lang === 'de') {
+      return (
+        'Not ettim, teşekkürler. 🙏\n' +
+        'Size doğru önerileri sunmak için birkaç küçük bilgi rica edeceğim:\n' +
+        '• Renk veya konsept (örn. beyaz, krem, siyah, kurumsal renkleriniz)\n' +
+        '• Ürünlerin üzerinde logo / nakış / baskı isteğiniz\n' +
+        '• Tek seferlik bir proje mi yoksa düzenli tüketim mi?\n\n' +
+        'Bu bilgilerle size en uygun kumaş, ölçü ve işçilik kombinasyonunu önerebilirim.'
+      );
+    }
+    if (lang === 'en') {
+      return (
+        'Noted, thank you. 🙏\n' +
+        'To give you the best possible options, I just need a few details:\n' +
+        '• Colour or concept (white, cream, black, or your brand colours)\n' +
+        '• Logo / embroidery / print details on the products\n' +
+        '• Is it a one-time project or continuous consumption?\n\n' +
+        'Based on this I can suggest the right fabric, sizes and workmanship.'
+      );
+    }
+    return (
+      'Not aldım, teşekkür ederim. 🙏\n' +
+      'Sizi doğru ürüne yönlendirebilmem için birkaç küçük bilgi daha rica edeceğim:\n' +
+      '• Renk veya konsept (beyaz, krem, siyah ya da kurumsal renkleriniz)\n' +
+      '• Ürün üzerinde logo / nakış / baskı isteğiniz\n' +
+      '• Tek seferlik bir proje mi, yoksa düzenli tüketim mi?\n\n' +
+      'Bu bilgilerle size uygun kumaş, ölçü ve işçilik kombinasyonunu önerebilirim.'
+    );
+  }
+
+  // -----------------------------
+  // 10) Genel, belirsiz ama soru içeren mesajlar
+  //     (Konu dışı bile olsa içeri çeker)
+// -----------------------------
+  if (isQuestion) {
+    if (lang === 'de') {
+      return (
+        'Sorunuz için teşekkür ederim. 🙏\n' +
+        'Bu kanalda özellikle tekstil ve Einweg-Lösungen tarafında size destek oluyorum, bu yüzden bazı konularda çok teknik değil; daha pratik ve işletmenize fayda sağlayacak şekilde yanıt veriyorum.\n\n' +
+        'Kısaca şu an işletmeniz için hangi ürün tarafında bir ihtiyacınız var (örneğin personel kıyafeti, Servietten, Tischwäsche, oda tekstili veya tek kullanımlık ürünler)? Oradan çok daha somut ilerleyebiliriz.'
+      );
+    }
+    if (lang === 'en') {
+      return (
+        'Thank you for your question. 🙏\n' +
+        'Here I mainly support you with textiles and disposable products for your business, so some topics I will answer from a practical, solution-oriented perspective rather than very technical details.\n\n' +
+        'To be really helpful, could you tell me which product area is currently relevant for you (staff wear, napkins, table textiles, room textiles or disposable items)? Then we can link your question directly to the right solution.'
+      );
+    }
+    return (
+      'Sorunuz için teşekkür ederim. 🙏\n' +
+      'Burada özellikle işletmeniz için tekstil ve tek kullanımlık ürün çözümlerine odaklanıyorum; bu yüzden bazı konularda çok teknik değil, daha pratik ve işinize fayda sağlayacak bir bakış açısıyla yanıt veriyorum.\n\n' +
+      'Sizin için şu anda hangi ürün alanı daha kritik? (örneğin personel kıyafeti, peçete/masa örtüsü, havlu/bornoz, nevresim ya da tek kullanımlık ürünler) Bunu paylaşırsanız, sorunuzla bağlantılı olarak en doğru yönlendirmeyi yapabilirim.'
+    );
+  }
+
+  // -----------------------------
+  // 11) Genel, belirsiz, soru olmayan mesajlar
+  // -----------------------------
+  if (lang === 'de') {
+    return (
+      'Mesajınız için teşekkür ederim. 🙏\n' +
+      'Sizi doğru çözümle buluşturabilmem için kısaca işletmenizi ve şu anda odaklandığınız ürün alanını yazmanız yeterli:\n' +
+      '• Hotel, Restaurant, Café, Catering, Klinik vb. hangisi?\n' +
+      '• Öncelikli ürün grubu (Schürzen, Berufsbekleidung, Servietten, Tischwäsche, Zimmertextilien, Einwegprodukte…)\n\n' +
+      'Bu bilgileri aldıktan sonra, tamamen işletmenize uygun bir yol haritası çıkarabiliriz.'
+    );
+  }
+  if (lang === 'en') {
+    return (
+      'Thank you for your message. 🙏\n' +
+      'To connect you with the right solution, it would be helpful if you briefly share:\n' +
+      '• What type of business you run (hotel, restaurant, café, catering, clinic, etc.)\n' +
+      '• Which product group is your current focus (staff wear, napkins, table textiles, room textiles, disposable items…)\n\n' +
+      'Once I have this, I can propose a path that fits your business very precisely.'
+    );
+  }
   return (
-    /(fiyat|ücret|kaça|kaç euro|ne kadar|maliyet)/.test(text) ||
-    /(price|cost|how much|euro)/.test(text) ||
-    /(preis|kosten|wie viel)/.test(text)
+    'Mesajınız için teşekkür ederim. 🙏\n' +
+    'Sizi en doğru çözüme yönlendirebilmem için kısaca şunları paylaşmanız yeterli:\n' +
+    '• İşletme türünüz (otel, restoran, kafe, catering, klinik vb.)\n' +
+    '• Şu anda odaklandığınız ürün grubu (personel kıyafeti, önlük, peçete, masa örtüsü, havlu/bornoz, nevresim, tek kullanımlık ürünler vb.)\n\n' +
+    'Bu bilgilerle, tamamen işletmenize uygun bir öneriyle devam edebiliriz.'
   );
 }
 
-// ----------------------------------------------------
-//  DİLE GÖRE CEVAP ÜRETİCİ
-// ----------------------------------------------------
-function buildReply(messageBody) {
-  const lang = detectLanguage(messageBody);
-  const interest = detectInterest(messageBody);
-  const text = (messageBody || '').trim();
-
-  // 1) Fiyat sorulmuşsa ama fiyat vermeden yönlendir
-  if (isPriceQuestion(messageBody)) {
-    if (lang === 'de') {
-      return (
-        'Vielen Dank für Ihre Anfrage. 😊\n\n' +
-        'Damit wir Ihnen ein passendes Angebot in *EUR* erstellen können, benötige ich kurz ein paar Infos:\n' +
-        '1️⃣ Art Ihres Betriebs (Hotel, Restaurant, Café, Catering usw.)\n' +
-        '2️⃣ Für welches Produkt interessieren Sie sich? (z.B. Schürzen, Stoffservietten, Tischwäsche, Einwegprodukte usw.)\n' +
-        '3️⃣ Ungefähre Stückzahl / monatlicher Bedarf\n\n' +
-        'Auf dieser Basis bereiten wir ein individuelles Angebot für Sie vor.'
-      );
-    }
-
-    if (lang === 'en') {
-      return (
-        'Thank you for your message. 😊\n\n' +
-        'To prepare a tailored offer in *EUR*, may I ask you a few quick questions:\n' +
-        '1️⃣ What type of business do you have? (hotel, restaurant, café, catering, etc.)\n' +
-        '2️⃣ Which product group are you interested in? (aprons, napkins, table linen, towels, disposable items, etc.)\n' +
-        '3️⃣ Approximate quantity / monthly demand?\n\n' +
-        'Once we have this information, we will prepare a customised offer for you.'
-      );
-    }
-
-    // varsayılan TR
-    return (
-      'Mesajınız için teşekkür ederiz. 😊\n\n' +
-      'Size *EUR* bazlı net bir teklif hazırlayabilmemiz için kısaca şu bilgileri alabilir miyim:\n' +
-      '1️⃣ İşletme türünüz nedir? (otel, restoran, kafe, catering vb.)\n' +
-      '2️⃣ Hangi ürün grubu ile ilgileniyorsunuz? (önlük, peçete, masa örtüsü, havlu, tek kullanımlık ürünler vb.)\n' +
-      '3️⃣ Tahmini adet ya da aylık tüketim miktarınız nedir?\n\n' +
-      'Bu bilgilerle size özel bir teklif hazırlayalım.'
-    );
-  }
-
-  // 2) Selam / ilk temas – genel karşılama
-  const isJustGreeting =
-    text &&
-    text.length < 40 &&
-    /(merhaba|selam|hallo|hello|hi|guten tag|guten morgen)/i.test(text);
-
-  if (isJustGreeting) {
-    if (lang === 'de') {
-      return (
-        'Hallo, herzlich willkommen bei *Ozak Textile & Pack*. 👋\n\n' +
-        'Wir produzieren individuell bedruckte und bestickte Textilien sowie Einwegprodukte für Hotels, Restaurants, Cafés und Catering-Betriebe.\n\n' +
-        'Damit ich Sie direkt richtig beraten kann:\n' +
-        '• Was für ein Betrieb sind Sie? (Hotel, Restaurant, Café, Catering …)\n' +
-        '• Für welche Produktgruppe interessieren Sie sich zuerst?'
-      );
-    }
-
-    if (lang === 'en') {
-      return (
-        'Hello, welcome to *Ozak Textile & Pack*. 👋\n\n' +
-        'We manufacture custom printed and embroidered textiles, as well as disposable products for hotels, restaurants, cafés and catering businesses.\n\n' +
-        'To guide you properly:\n' +
-        '• What type of business do you run? (hotel, restaurant, café, catering, etc.)\n' +
-        '• Which product group would you like to start with?'
-      );
-    }
-
-    return (
-      'Merhaba, *Ozak Textile & Pack*’e hoş geldiniz. 👋\n\n' +
-      'Otel, restoran, kafe ve catering işletmeleri için özel baskılı ve nakışlı tekstil ürünleri ile tek kullanımlık çözümler üretiyoruz.\n\n' +
-      'Sizi doğru yönlendirebilmem için kısaca sorabilir miyim:\n' +
-      '• İşletme türünüz nedir?\n' +
-      '• Öncelikle hangi ürün grubunu düşünüyorsunuz?'
-    );
-  }
-
-  // 3) İlgi alanına göre kısa tanıtım + sorular
-  if (lang === 'de') {
-    switch (interest) {
-      case 'apron':
-        return (
-          'Vielen Dank für Ihr Interesse an unseren Schürzen. 👨‍🍳👩‍🍳\n\n' +
-          'Wir fertigen professionelle Schürzen mit *Druck* und *Stickerei* – ideal für Service- und Küchenpersonal.\n\n' +
-          'Damit wir das passende Modell empfehlen können:\n' +
-          '1️⃣ In welchem Bereich werden die Schürzen eingesetzt? (Service, Küche, Bar …)\n' +
-          '2️⃣ Bevorzugte Farbe(n) und Stoffart?\n' +
-          '3️⃣ Ungefähre Stückzahl?'
-        );
-      case 'napkin':
-        return (
-          'Stoffservietten sind ein wichtiger Teil des Tischbildes. 🕯️🍷\n\n' +
-          'Wir produzieren hochwertige Servietten, auf Wunsch mit Logo-Druck oder Stickerei, speziell für Hotels und Restaurants.\n\n' +
-          'Darf ich kurz fragen:\n' +
-          '1️⃣ Welches Format bevorzugen Sie? (z.B. 40×40 cm)\n' +
-          '2️⃣ Welche Farbe bzw. Farbrichtung?\n' +
-          '3️⃣ Ca. Stückzahl oder monatlicher Verbrauch?'
-        );
-      case 'tablecloth':
-        return (
-          'Tischwäsche ist entscheidend für den Gesamteindruck Ihres Hauses. 🤍\n\n' +
-          'Wir fertigen Tischdecken in Sondermaßen, mit robusten Stoffen, abgestimmt auf Ihr Konzept.\n\n' +
-          'Können Sie mir kurz sagen:\n' +
-          '1️⃣ Welche Tischgrößen bzw. Maße Sie benötigen\n' +
-          '2️⃣ Welche Stoffqualität Sie bevorzugen\n' +
-          '3️⃣ Wie viele Tische ungefähr ausgestattet werden sollen?'
-        );
-      case 'packaging':
-        return (
-          'Zu unseren Lösungen gehören auch Einweg- und Verpackungsprodukte mit Ihrem Branding. 📦\n\n' +
-          'Zum Beispiel: bedruckte Servietten, To-go-Verpackungen, Becherhüllen u.v.m.\n\n' +
-          'Damit wir gezielt Vorschläge machen können:\n' +
-          '1️⃣ In welchem Bereich möchten Sie Einwegprodukte einsetzen?\n' +
-          '2️⃣ Welche Produkte haben Sie konkret im Kopf?\n' +
-          '3️⃣ Ungefähre Mengen / monatlicher Bedarf?'
-        );
-      default:
-        return (
-          'Vielen Dank für Ihre Nachricht. 🙏\n\n' +
-          'Wir sind auf maßgeschneiderte Textilien und Einwegprodukte für die Gastronomie und Hotellerie spezialisiert – inkl. *Logodruck* und *Stickerei*.\n\n' +
-          'Damit ich Ihnen passende Vorschläge machen kann, sagen Sie mir bitte kurz:\n' +
-          '1️⃣ Art Ihres Betriebs (Hotel, Restaurant, Café, Catering …)\n' +
-          '2️⃣ Für welche Produktgruppe interessieren Sie sich zuerst?\n' +
-          '3️⃣ Ungefähre Stückzahl bzw. jährlicher Bedarf?'
-        );
-    }
-  }
-
-  if (lang === 'en') {
-    switch (interest) {
-      case 'apron':
-        return (
-          'Thank you for your interest in our professional aprons. 👨‍🍳👩‍🍳\n\n' +
-          'We produce durable aprons with *logo print* and *embroidery*, ideal for service and kitchen teams.\n\n' +
-          'To recommend the best option for you:\n' +
-          '1️⃣ Where will the aprons be used? (service, kitchen, bar, etc.)\n' +
-          '2️⃣ Preferred colours and fabric type?\n' +
-          '3️⃣ Approximate quantity?'
-        );
-      case 'napkin':
-        return (
-          'Napkins are a key detail on your tables. 🕯️🍷\n\n' +
-          'We offer high-quality fabric napkins, with optional logo print or embroidery, tailored for hotels and restaurants.\n\n' +
-          'May I ask:\n' +
-          '1️⃣ What size do you prefer? (e.g. 40×40 cm)\n' +
-          '2️⃣ Which colour range?\n' +
-          '3️⃣ Approximate quantity or monthly usage?'
-        );
-      case 'tablecloth':
-        return (
-          'Table linen defines the overall look of your venue. 🤍\n\n' +
-          'We produce custom-sized tablecloths with fabrics suitable for intensive professional use.\n\n' +
-          'To guide you better:\n' +
-          '1️⃣ What table sizes / dimensions do you need?\n' +
-          '2️⃣ Preferred fabric quality?\n' +
-          '3️⃣ Rough number of tables to be covered?'
-        );
-      case 'packaging':
-        return (
-          'We also provide branded disposable and packaging solutions. 📦\n\n' +
-          'Examples: printed napkins, to-go packaging, cup sleeves and more.\n\n' +
-          'To make concrete suggestions:\n' +
-          '1️⃣ In which area do you plan to use disposable products?\n' +
-          '2️⃣ Which items are you mainly interested in?\n' +
-          '3️⃣ Approximate volumes / monthly demand?'
-        );
-      default:
-        return (
-          'Thank you for reaching out. 🙏\n\n' +
-          'Ozak Textile & Pack specialises in custom textiles and disposable products for hotels, restaurants, cafés and catering – including *logo print* and *embroidery*.\n\n' +
-          'To make the most relevant suggestions, could you please tell me:\n' +
-          '1️⃣ What type of business you run\n' +
-          '2️⃣ Which product group you are interested in first\n' +
-          '3️⃣ Approximate quantity or annual demand'
-        );
-    }
-  }
-
-  // 4) Varsayılan: Türkçe senaryo
-  switch (interest) {
-    case 'apron':
-      return (
-        'Önlük tarafına ilginiz için teşekkür ederiz. 👨‍🍳👩‍🍳\n\n' +
-        'Profesyonel mutfak ve servis ekipleri için, baskılı ve nakışlı uzun ömürlü önlükler üretiyoruz.\n\n' +
-        'Sizi doğru modele yönlendirmek için kısaca sorabilir miyim:\n' +
-        '1️⃣ Önlükler hangi alanda kullanılacak? (servis, mutfak, bar vb.)\n' +
-        '2️⃣ Tercih ettiğiniz renk ve kumaş tipi nedir?\n' +
-        '3️⃣ Tahmini adet / dönemsel ihtiyacınız ne kadar?'
-      );
-    case 'napkin':
-      return (
-        'Kumaş peçeteler, masanın genel şıklığını tamamlayan önemli bir detaydır. 🕯️🍷\n\n' +
-        'Otel ve restoranlar için logolu baskı veya nakışlı, farklı ölçülerde kumaş peçeteler üretiyoruz.\n\n' +
-        'Kısaca şunları paylaşabilir misiniz:\n' +
-        '1️⃣ Tercih ettiğiniz ölçü nedir? (örn. 40×40 cm)\n' +
-        '2️⃣ Renk veya konsept tercihiniz nedir?\n' +
-        '3️⃣ Tahmini adet ya da aylık kullanım miktarı nedir?'
-      );
-    case 'tablecloth':
-      return (
-        'Masa örtüleri, işletmenizin ilk izleniminde büyük rol oynar. 🤍\n\n' +
-        'Yoğun kullanıma uygun, özel ölçülü masa örtüleri üretiyoruz.\n\n' +
-        'Size uygun çözümü önermek için:\n' +
-        '1️⃣ Masa ölçüleriniz / ebatlarınız nelerdir?\n' +
-        '2️⃣ Kumaş kalitesi ve renk tercihiniz nedir?\n' +
-        '3️⃣ Kaç masa için düşünüyorsunuz?'
-      );
-    case 'packaging':
-      return (
-        'Tek kullanımlık ve ambalaj tarafında da markanıza özel baskılı çözümler sunuyoruz. 📦\n\n' +
-        'Örneğin: baskılı peçeteler, paket servis ambalajları, bardak kılıfları vb.\n\n' +
-        'Daha net yönlendirebilmem için:\n' +
-        '1️⃣ Hangi alanda kullanmayı planlıyorsunuz? (restoran, kafe, otel odası vb.)\n' +
-        '2️⃣ Hangi ürünlere öncelik veriyorsunuz?\n' +
-        '3️⃣ Tahmini adet / aylık tüketiminiz nedir?'
-      );
-    default:
-      return (
-        'Mesajınız için teşekkür ederiz. 🙏\n\n' +
-        '*Ozak Textile & Pack* olarak otel, restoran, kafe ve catering işletmeleri için özel baskılı ve nakışlı tekstil ürünleri ile tek kullanımlık çözümler üretiyoruz.\n\n' +
-        'Sizi en doğru ürünlere yönlendirebilmemiz için kısaca paylaşabilir misiniz:\n' +
-        '1️⃣ İşletme türünüz nedir? (otel, restoran, kafe, catering vb.)\n' +
-        '2️⃣ Hangi ürün grubundan başlamak istersiniz? (önlük, peçete, masa örtüsü, havlu, tek kullanımlık ürünler vb.)\n' +
-        '3️⃣ Tahmini adet veya yıllık tüketim miktarınız nedir?'
-      );
-  }
-}
-
-// ----------------------------------------------------
+// -----------------------------
 //  GLOBAL QR EVENT LISTENER
-// ----------------------------------------------------
+// -----------------------------
 ev.on('qr.**', (qr, sessionId) => {
   console.log('🔥 Yeni QR event geldi! Session:', sessionId);
 
@@ -324,9 +506,9 @@ ev.on('qr.**', (qr, sessionId) => {
   console.log('QR güncellendi. Uzunluk:', qr.length);
 });
 
-// ----------------------------------------------------
+// -----------------------------
 //  WA CLIENT BAŞLATMA
-// ----------------------------------------------------
+// -----------------------------
 function start() {
   console.log('WA başlatılıyor...');
 
@@ -337,13 +519,14 @@ function start() {
     authTimeout: 0,
     qrLogSkip: false,
     headless: true,
-    useChrome: false,
+    useChrome: false, // Docker içinde Chromium kullanıyoruz
     cacheEnabled: false,
     restartOnCrash: start
   })
     .then(client => {
       console.log('WA Client oluşturuldu 🚀');
 
+      // Bağlantı durumu
       client.onStateChanged(state => {
         console.log('State →', state);
 
@@ -361,9 +544,9 @@ function start() {
         latestQrDataUrl = null;
       });
 
-      // ----------------------------------------------------
+      // -----------------------------
       //  GELEN MESAJLARA CEVAP
-      // ----------------------------------------------------
+      // -----------------------------
       client.onMessage(async msg => {
         try {
           console.log('📩 Yeni mesaj geldi:', {
@@ -377,10 +560,20 @@ function start() {
             return;
           }
 
-          const replyText = buildReply(msg.body);
-          await client.sendText(msg.from, replyText);
+          const text = (msg.body || '').trim();
+          const session = getOrCreateSession(msg.from, text);
 
-          console.log('✅ Mesaja cevap gönderildi:', msg.from);
+          if (session.step < 5) {
+            session.step += 1;
+          }
+
+          const replyText = buildSmartReply({
+            lang: session.lang,
+            text,
+            step: session.step
+          });
+
+          await sendWithDelay(client, msg.from, replyText);
         } catch (err) {
           console.error('Mesaj işlenirken hata:', err);
         }
@@ -391,13 +584,12 @@ function start() {
     });
 }
 
-// ----------------------------------------------------
-//  ROOT ENDPOINT
-// ----------------------------------------------------
+// -----------------------------
+//  EXPRESS ENDPOINTLER
+// -----------------------------
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
-    streamMode: true,
     isAuthenticated,
     qrTimestamp: lastQrTime,
     qrAgeSeconds: lastQrTime
@@ -406,9 +598,6 @@ app.get('/', (req, res) => {
   });
 });
 
-// ----------------------------------------------------
-//  QR ENDPOINT
-// ----------------------------------------------------
 app.get('/qr.png', (req, res) => {
   res.setHeader('Cache-Control', 'no-store, must-revalidate');
 
@@ -427,9 +616,9 @@ app.get('/qr.png', (req, res) => {
   res.send(buffer);
 });
 
-// ----------------------------------------------------
-//  SERVER + WA CLIENT BAŞLAT
-// ----------------------------------------------------
+// -----------------------------
+//  SERVER + WA CLIENT
+// -----------------------------
 app.listen(PORT, () => {
   console.log('HTTP server çalışıyor:', PORT);
   start();
