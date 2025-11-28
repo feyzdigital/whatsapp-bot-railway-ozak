@@ -1,6 +1,6 @@
 // index.js
 // Ozak Textile & Pack – WhatsApp Satış Asistanı (TR/DE/EN)
-// QR streaming + doğal satışçı mantığı
+// QR streaming + doğal satışçı + basit sohbet hafızası
 
 const { create, ev } = require('@open-wa/wa-automate');
 const express = require('express');
@@ -14,6 +14,24 @@ const PORT = process.env.PORT || 8080;
 let latestQrDataUrl = null;
 let lastQrTime = 0;
 let isAuthenticated = false;
+
+// ------------------------------------
+// BASİT SOHBET HAFIZASI (RAM)
+// chatId/from bazlı
+// ------------------------------------
+const chatSessions = {}; // { [chatId]: { lang, greetSent, businessType, lastFocus } }
+
+function getSession(id) {
+  if (!chatSessions[id]) {
+    chatSessions[id] = {
+      lang: null,
+      greetSent: false,
+      businessType: null, // 'hotel' | 'restaurant' | 'cafe' | 'construction' | ...
+      lastFocus: null, // 'textile' | 'packaging' | 'mixed'
+    };
+  }
+  return chatSessions[id];
+}
 
 // ------------------------------------
 // ÜRÜN ENVANTERİ (ÖZET)
@@ -55,7 +73,7 @@ const TEXTILE_PRODUCTS = [
     tr: 'Bisiklet Yaka Likralı T-shirt',
     de: 'Rundhals T-Shirt',
     en: 'Crew Neck T-shirt',
-    tags: ['tshirt', 'tişört', 't-shirt', 't shirt', 't shırt'],
+    tags: ['polo', 'polo yaka', 'yaka', 'tshirt', 'tişört', 't-shirt', 't shirt'],
   },
 ];
 
@@ -107,18 +125,18 @@ function detectLanguage(textRaw) {
 
   const hasTR =
     /[ığüşöçİĞÜŞÖÇ]/.test(textRaw || '') ||
-    /(merhaba|teşekkür|teşekkur|fiyat|adet|firma|işletme|özel üretim|teklif)/i.test(
+    /(merhaba|teşekkür|tesekkur|fiyat|adet|tane|firma|işletme|isletme|özel üretim|ozel uretim|teklif|istiyorum|lazım|lazim|var)/i.test(
       text
     );
 
   const hasDE =
     /[äöüßÄÖÜ]/.test(textRaw || '') ||
-    /(hallo|guten tag|danke|anfrage|stück|firma|betrieb|angebot|preis)/i.test(
+    /(hallo|guten tag|danke|anfrage|stück|stuck|betrieb|angebot|preis)/i.test(
       text
     );
 
   const hasEN =
-    /(hello|hi|good morning|good afternoon|thanks|thank you|price|quote|company)/i.test(
+    /(hello|hi\b|good morning|good afternoon|thanks|thank you|price|quote|company)/i.test(
       text
     );
 
@@ -126,7 +144,6 @@ function detectLanguage(textRaw) {
   if (hasDE && !hasTR && !hasEN) return 'de';
   if (hasEN && !hasTR && !hasDE) return 'en';
 
-  // Öncelik sırası: TR > DE > EN
   if (hasTR) return 'tr';
   if (hasDE) return 'de';
   if (hasEN) return 'en';
@@ -143,29 +160,32 @@ function extractBasics(textRaw) {
   const text = (textRaw || '').toLowerCase();
 
   const isGreeting =
-    /(merhaba|selam|iyi günler|iyi akşamlar|günaydın|moin|hallo|hello|hi\b)/i.test(
+    /(merhaba|selam|slm\b|iyi günler|iyi akşamlar|günaydın|moin|hallo|hello|hi\b)/i.test(
       text
     );
 
   const wantsPrice =
-    /(fiyat|ücret|kaça|ne kadar|angebot|preis|kosten|price|quote|offer)/i.test(
+    /(fiyat|ücret|ucret|kaça|kaca|ne kadar|angebot|preis|kosten|price|quote|offer)/i.test(
       text
     );
 
   const hasQty =
-    /\b\d+\s*(adet|pcs|stück|tane)?\b/i.test(text) ||
-    /(adet|tane|stück|pieces?)/i.test(text);
+    /\b\d+\s*(adet|pcs|stück|stuck|tane)?\b/i.test(text) ||
+    /(adet|tane|stück|stuck|pieces?)/i.test(text);
 
   const isOffTopic =
-    /(motivasyon|aşk|ilişki|hava nasıl|hava durumu|oyun|film|dizi)/i.test(text);
+    /(motivasyon|aşk|ask|ilişki|iliski|hava nasıl|hava durumu|oyun|film|dizi)/i.test(
+      text
+    );
 
+  // Textil sinyalleri – bilinçli geniş tuttuk
   const mentionsTextileKeywords =
-    /(sweatshirt|hoodie|polar|polo|t[- ]?shirt|tişört|tshirt|üniforma|forma|personel|çalışan|iş kıyafeti|arbeitskleidung|uniform)/i.test(
+    /(sweatshirt|hoodie|polar|polo|t[- ]?shirt|tişört|tisort|tshirt|üniforma|uniforma|forma|personel|çalışan|calisan|iş kıyafeti|is kiyafeti|arbeitskleidung|uniform|yelek|mont|ceket|hırka|hirka|gömlek|gomlek)/i.test(
       text
     );
 
   const mentionsPackagingKeywords =
-    /(dürüm|döner|peçete|servis peçete|cepli peçete|pizza|karton|kutu|ambalaj|tek kullanımlık|take away|takeaway|delivery)/i.test(
+    /(dürüm|durum|döner|doner|peçete|pecete|servis peçete|cepli peçete|pizza|karton|kutu|ambalaj|tek kullanımlık|tek kullanimlik|take away|takeaway|delivery)/i.test(
       text
     );
 
@@ -173,10 +193,11 @@ function extractBasics(textRaw) {
   if (/otel|hotel/i.test(text)) sectorHints.push('hotel');
   if (/restoran|restaurant|lokanta/i.test(text)) sectorHints.push('restaurant');
   if (/kafe|cafe|kahve/i.test(text)) sectorHints.push('cafe');
-  if (/catering|organizasyon/i.test(text)) sectorHints.push('catering');
+  if (/catering|organizasyon|organisation/i.test(text)) sectorHints.push('catering');
   if (/inşaat|insaat|şantiye|santiye|bau|construction/i.test(text))
     sectorHints.push('construction');
-  if (/klinik|hastane|health|arztpraxis/i.test(text)) sectorHints.push('clinic');
+  if (/klinik|hastane|health|arztpraxis|praxis/i.test(text))
+    sectorHints.push('clinic');
 
   const productHits = {
     textile: [],
@@ -210,7 +231,7 @@ function extractBasics(textRaw) {
 }
 
 // ------------------------------------
-// YARDIMCI: ÜRÜN ÖNERİ METNİ
+// YARDIMCI: ÜRÜN ÖNERİ METNİ (KISA ÖZET)
 // ------------------------------------
 
 function buildProductSummary(lang, focus) {
@@ -242,7 +263,6 @@ function buildProductSummary(lang, focus) {
       );
     }
   } else {
-    // en
     if (useTextile) {
       parts.push(
         'On the textile side, we mainly produce corporate tops: sweatshirts, hoodies, fleece jackets, polo and crew neck t-shirts.'
@@ -259,12 +279,17 @@ function buildProductSummary(lang, focus) {
 }
 
 // ------------------------------------
-// ANA CEVAP MOTORU
+// ANA CEVAP MOTORU (SESSION BİLGİSİYLE)
 // ------------------------------------
 
-function buildSmartReply(messageBody, lang) {
+function buildSmartReply(messageBody, lang, session) {
   const text = (messageBody || '').trim();
   const info = extractBasics(text);
+
+  // Sektör bilgisini sessiyona yaz
+  if (info.sectors.length > 0 && !session.businessType) {
+    session.businessType = info.sectors[0];
+  }
 
   const hasAnyTextileSignal =
     info.mentionsTextileKeywords || info.productHits.textile.length > 0;
@@ -275,20 +300,23 @@ function buildSmartReply(messageBody, lang) {
   let focus = 'textile';
   if (hasAnyTextileSignal && hasAnyPackagingSignal) focus = 'mixed';
   else if (!hasAnyTextileSignal && hasAnyPackagingSignal) focus = 'packaging';
+  session.lastFocus = focus;
 
+  // --------------------------------
   // 1) Çok off-topic ise: nazikçe satışa çek
+  // --------------------------------
   if (info.isOffTopic) {
     if (lang === 'tr') {
       return (
-        'Güzel bir soru 🙂 Ama ben burada daha çok işletmeniz için tekstil ve baskılı ambalaj çözümlerine odaklanıyorum.\n\n' +
+        'Güzel bir nokta 🙂 Ben burada daha çok işletmeniz için tekstil ve baskılı ambalaj çözümlerine odaklanıyorum.\n\n' +
         buildProductSummary(lang, 'mixed') +
-        '\n\nİsterseniz işletmenizi ve şu an için en öncelikli ürün ihtiyacınızı (örneğin personel üst giyim veya baskılı peçete/ambalaj) kısaca yazın; buradan birlikte şekillendirelim.'
+        '\n\nİsterseniz işletmenizi ve şu an için en öncelikli ürün ihtiyacınızı (örneğin personel üst giyim veya baskılı peçete/ambalaj) kısaca yazın; oradan devam edelim.'
       );
     } else if (lang === 'de') {
       return (
-        'Spannende Frage 🙂 Ich bin hier aber hauptsächlich für Ihre Textil- und Verpackungslösungen zuständig.\n\n' +
+        'Spannende Frage 🙂 Ich bin hier allerdings hauptsächlich für Ihre Textil- und Verpackungslösungen zuständig.\n\n' +
         buildProductSummary(lang, 'mixed') +
-        '\n\nWenn Sie möchten, schreiben Sie kurz, welche Art von Betrieb Sie haben und womit wir starten sollen (z.B. Mitarbeiterbekleidung oder bedruckte Servietten/Verpackung).'
+        '\n\nWenn Sie mir kurz Ihren Betrieb und das aktuell wichtigste Thema nennen (z.B. Mitarbeiterbekleidung oder bedruckte Servietten/Verpackung), können wir gezielt weitermachen.'
       );
     } else {
       return (
@@ -299,108 +327,144 @@ function buildSmartReply(messageBody, lang) {
     }
   }
 
-  // 2) Selam + çok genel mesaj (ilk temas gibi)
-  if (info.isGreeting && !hasAnyTextileSignal && !hasAnyPackagingSignal) {
+  // --------------------------------
+  // 2) İLK SELAMLAMA (sadece 1 kere büyük intro)
+  // --------------------------------
+  if (info.isGreeting && !session.greetSent) {
+    session.greetSent = true;
+
     if (lang === 'tr') {
       return (
         'Merhaba, Ozak Textile & Pack’e hoş geldiniz. 👋\n\n' +
         buildProductSummary(lang, 'mixed') +
-        '\n\nİsterseniz kısaca işletmenizi (örneğin otel, restoran, kafe, üretim, inşaat vb.) ve öncelikli ihtiyacınızı yazın; ben de size en uygun ürün grubunu önereyim.'
+        '\n\nKısaca işletmenizi (örneğin otel, restoran, kafe, üretim, inşaat vb.) ve ilk olarak hangi ürünle ilgilendiğinizi yazarsanız, buradan beraber netleştiririz.'
       );
     } else if (lang === 'de') {
       return (
         'Hallo, willkommen bei Ozak Textile & Pack. 👋\n\n' +
         buildProductSummary(lang, 'mixed') +
-        '\n\nSchreiben Sie mir kurz, was für einen Betrieb Sie haben (z.B. Hotel, Restaurant, Café, Produktion, Bau etc.) und welches Thema gerade am wichtigsten ist. Dann schlage ich Ihnen passende Produkte vor.'
+        '\n\nSchreiben Sie mir kurz, was für einen Betrieb Sie haben und mit welcher Produktgruppe wir starten sollen, dann finden wir eine passende Lösung.'
       );
     } else {
       return (
         'Hello, welcome to Ozak Textile & Pack. 👋\n\n' +
         buildProductSummary(lang, 'mixed') +
-        '\n\nIf you briefly describe your business (hotel, restaurant, café, production, construction etc.) and what you need first, I can guide you to the most suitable product group.'
+        '\n\nIf you briefly describe your business and what you need first, I can guide you to the most suitable product group.'
       );
     }
   }
 
-  // 3) TEXTILE ağırlıklı net bir istek (örnek: inşaat firması için mont/yelek/tshirt)
+  // --------------------------------
+  // 3) TEXTILE ağırlıklı net bir istek (yelek/mont/tshirt vb.)
+  // --------------------------------
   if (hasAnyTextileSignal) {
-    const hasConstruction = info.sectors.includes('construction');
+    const hasConstruction = session.businessType === 'construction';
+    const hasRestaurant = session.businessType === 'restaurant';
+
+    const mentionsVest =
+      /yelek/.test(text) ||
+      /mont/.test(text) ||
+      /ceket/.test(text) ||
+      /hirka|hırka/.test(text);
 
     if (lang === 'tr') {
       let intro = '';
 
       if (hasConstruction) {
         intro =
-          'İnşaat tarafında çalışanlar için dayanıklı ve kolay temizlenebilir üst giyim gerçekten önemli, çok doğru bir ihtiyaç tanımı yapmışsınız.\n\n';
+          'İnşaat tarafında çalışanlar için dayanıklı ve kolay temizlenebilir üst giyim gerçekten kritik; doğru yerdesiniz.\n\n';
+      } else if (hasRestaurant) {
+        intro =
+          'Restoran ekibi için hem şık hem de dayanıklı, logolu üst giyim üretimi yapıyoruz; servis ve mutfak için farklı çözümler oluşturabiliyoruz.\n\n';
       }
 
       const qtyNote = info.hasQty
-        ? 'Adet bilgisi vermeniz çok iyi oldu, üretim tarafında planlama yaparken direkt net çalışabiliyoruz.\n'
+        ? 'Adet bilgisini paylaşmanız çok iyi oldu, üretim tarafında planlamayı direkt netleştirebiliyoruz.\n'
         : 'Yaklaşık adet bilgisini de paylaşırsanız, üretim tarafında sizi en verimli çözümle yönlendirebiliriz.\n';
 
-      const priceNote =
-        info.wantsPrice
-          ? 'Fiyatlandırmayı burada otomatik paylaşmak yerine, talebiniz netleştikten sonra size özel teklif olarak hazırlanıyor. Bu sayede gereksiz kalem olmadan, direkt ihtiyacınıza göre bir çalışma çıkıyor.\n\n'
-          : '';
+      const priceNote = info.wantsPrice
+        ? 'Fiyatı burada otomatik yazmıyoruz; talebiniz netleştikten sonra, size özel teklif olarak hazırlanıyor. Böylece gereksiz kalem olmadan sadece ihtiyacınıza uygun bir çalışma çıkıyor.\n\n'
+        : '';
+
+      let garmentHint = '';
+      if (mentionsVest) {
+        garmentHint =
+          'Yelek, mont ve benzeri dış giyim ürünlerini de, aynı kurumsal kalite standartlarıyla logolu olarak üretebiliyoruz.\n';
+      }
 
       const productText =
-        'Üst giyim tarafında sweatshirt, hoodie, polar ceket, polo ve bisiklet yaka t-shirt ile çalışıyoruz. Tamamı logo nakış/baskı uygulamasına uygun, kurumsal kalite kumaşlarla üretiliyor.';
+        'Üst giyim tarafında sweatshirt, hoodie, polar ceket, polo ve bisiklet yaka t-shirt ile çalışıyoruz. Tamamı logo nakış/baskı uygulamasına uygun, kurumsal kumaşlarla üretiliyor.';
 
       return (
         intro +
+        garmentHint +
         qtyNote +
         priceNote +
         productText +
-        '\n\nDilerseniz şu sorularla netleştirelim:\n' +
-        '• Personeliniz için hangi kombin daha uygun olur: sweatshirt/hoodie mi, yoksa daha çok polo & t-shirt odaklı mı düşünüyorsunuz?\n' +
-        '• Kurumsal renklerinizi (ve varsa logo dosyanızı) kısaca paylaşabilir misiniz?'
+        '\n\nDevam edebilmem için kısaca şunları bilmem çok işe yarar:\n' +
+        '• Ürünler daha çok hangi ekip için? (servis, mutfak, saha, depo vb.)\n' +
+        '• Kurumsal renkleriniz ve logo kullanımınız nasıl? (örneğin sadece göğüs nakış, kol baskı vb.)'
       );
     } else if (lang === 'de') {
       const qtyNote = info.hasQty
         ? 'Dass Sie die Stückzahl nennen, ist perfekt – so können wir die Produktion direkt passend planen.\n'
         : 'Wenn Sie mir eine ungefähre Stückzahl nennen, kann ich die Lösung produktionstechnisch besser einschätzen.\n';
 
-      const priceNote =
-        info.wantsPrice
-          ? 'Preise verschicken wir nicht automatisch im Chat, sondern immer als individuelles Angebot, sobald Ihre Anfrage klar ist. So bleibt es für Sie übersichtlich und wirklich bedarfsgerecht.\n\n'
-          : '';
+      const priceNote = info.wantsPrice
+        ? 'Preise verschicken wir nicht automatisch im Chat, sondern als individuelles Angebot, sobald Ihre Anfrage klar ist.\n\n'
+        : '';
+
+      let garmentHint = '';
+      if (mentionsVest) {
+        garmentHint =
+          'Auch Westen, Jacken oder ähnliche Outerwear können wir als Corporate-Bekleidung mit Ihrem Logo umsetzen.\n';
+      }
 
       const productText =
-        'Im Bereich Oberbekleidung arbeiten wir mit Sweatshirts, Hoodies, Fleece-Jacken sowie Polo- und Rundhals-T-Shirts – alle geeignet für Logo-Stick oder -Druck in Corporate-Qualität.';
+        'Im Bereich Oberbekleidung arbeiten wir mit Sweatshirts, Hoodies, Fleece-Jacken sowie Polo- und Rundhals-T-Shirts – alle geeignet für Logo-Stick oder -Druck.';
 
       return (
         qtyNote +
         priceNote +
+        garmentHint +
         productText +
-        '\n\nLassen Sie uns kurz klären:\n' +
-        '• Was passt besser zu Ihrem Team: eher Sweatshirt/Hoodie oder eher Polo & T-Shirt?\n' +
+        '\n\nHilfreich wäre noch kurz:\n' +
+        '• Für welches Team sind die Teile gedacht? (Service, Küche, Außendienst etc.)\n' +
         '• In welchen Farben bzw. mit welchem Logo möchten Sie arbeiten?'
       );
     } else {
       const qtyNote = info.hasQty
-        ? 'Great that you already mentioned approximate quantities – that really helps on the production side.\n'
-        : 'If you can share an approximate quantity, we can better shape the production and pricing on our side.\n';
+        ? 'Great that you already mentioned quantities – that really helps on the production side.\n'
+        : 'If you can share an approximate quantity, we can better plan production and shape a solution that makes sense for you.\n';
 
-      const priceNote =
-        info.wantsPrice
-          ? 'Instead of sending automatic price lists here, we prepare a tailored quotation once your request is clear. That way you only see what is really relevant for your business.\n\n'
-          : '';
+      const priceNote = info.wantsPrice
+        ? 'Instead of sending automatic price lists, we prepare a tailored quotation once your request is clear.\n\n'
+        : '';
+
+      let garmentHint = '';
+      if (mentionsVest) {
+        garmentHint =
+          'We can also produce vests, jackets and similar outerwear as corporate staffwear with your logo.\n';
+      }
 
       const productText =
-        'For staffwear tops we mainly work with sweatshirts, hoodies, fleece jackets, polo and crew neck t-shirts – all suitable for logo embroidery or print, in corporate-quality fabrics.';
+        'For staffwear tops we mainly work with sweatshirts, hoodies, fleece jackets, polo and crew neck t-shirts – all suitable for logo embroidery or print.';
 
       return (
         qtyNote +
         priceNote +
+        garmentHint +
         productText +
         '\n\nTo move forward, it would help to know:\n' +
-        '• Which combination fits your team better: sweatshirt/hoodie or more polo & t-shirts?\n' +
-        '• Which colors and logo should we work with?'
+        '• Which team are these garments for? (service, kitchen, field, warehouse etc.)\n' +
+        '• Which colors and logo placement do you prefer?'
       );
     }
   }
 
+  // --------------------------------
   // 4) PACKAGING ağırlıklı (dürüm, döner, peçete, pizza vb.)
+  // --------------------------------
   if (hasAnyPackagingSignal) {
     if (lang === 'tr') {
       const qtyPart = info.hasQty
@@ -412,21 +476,21 @@ function buildSmartReply(messageBody, lang) {
         : '';
 
       return (
-        'Baskılı ambalaj tarafı için çok doğru yerdesiniz. Özellikle dürüm/döner kağıdı, baskılı peçete, çatal-bıçaklı cepli peçete ve pizza kutusu üretiyoruz.\n\n' +
+        'Baskılı ambalaj tarafı için doğru yerdesiniz. Özellikle dürüm/döner kağıdı, baskılı peçete, çatal-bıçaklı cepli peçete ve pizza kutusu üretiyoruz.\n\n' +
         qtyPart +
         pricePart +
         'Kısaca şunları yazarsanız, sizin için en mantıklı kombinasyonu önerebilirim:\n' +
-        '• Ürün grubunuz: dürüm/döner, pizza, sıcak-soğuk içecek, vb.\n' +
+        '• Ürün grubunuz: dürüm/döner, pizza, içecek vb.\n' +
         '• Tek kullanımlık tarafta öne çıkan ürün tipleri (kağıt, peçete, kutu vb.)\n' +
-        '• Logo baskısı düşünüyor musunuz, sadece beyaz/renkli düz ürün mü istersiniz?'
+        '• Logo baskısı düşünüyor musunuz, yoksa daha sade çözümler mi istersiniz?'
       );
     } else if (lang === 'de') {
       const qtyPart = info.hasQty
         ? 'Mit einer konkreten Stückzahl können wir die Produktion deutlich besser einplanen.\n'
-        : 'In diesem Bereich arbeiten wir meist mit großen Stückzahlen; ein grober Jahresverbrauch oder Bestellmenge wäre hilfreich.\n';
+        : 'In diesem Bereich arbeiten wir meist mit größeren Stückzahlen; ein grober Jahresverbrauch oder eine Bestellmenge wäre sehr hilfreich.\n';
 
       const pricePart = info.wantsPrice
-        ? 'Preise senden wir nicht automatisch, sondern immer als individuelles Angebot – abhängig von Motiv, Auflage und Produkt.\n\n'
+        ? 'Preise senden wir nicht automatisch, sondern als individuelles Angebot – abhängig von Motiv, Auflage und Produkt.\n\n'
         : '';
 
       return (
@@ -435,8 +499,8 @@ function buildSmartReply(messageBody, lang) {
         pricePart +
         'Schreiben Sie mir kurz:\n' +
         '• Für welche Produktgruppe (Dürüm/Döner, Pizza etc.)?\n' +
-        '• Welche Einwegprodukte sind für Sie wichtiger (Papier, Serviette, Karton)?\n' +
-        '• Mit Logo-Druck oder eher neutral?'
+        '• Welche Einwegprodukte sind für Sie wichtiger (Papier, Servietten, Kartons)?\n' +
+        '• Mit Logo-Druck oder eher schlicht?'
       );
     } else {
       const qtyPart = info.hasQty
@@ -444,7 +508,7 @@ function buildSmartReply(messageBody, lang) {
         : 'In this product group we usually work with larger volumes, so an approximate yearly consumption or order quantity would be very helpful.\n';
 
       const pricePart = info.wantsPrice
-        ? 'We don’t send automatic price lists here – pricing is always prepared as a tailored quotation based on artwork, volume and product type.\n\n'
+        ? 'We don’t send automatic price lists – pricing is always prepared as a tailored quotation based on artwork, volume and product type.\n\n'
         : '';
 
       return (
@@ -459,30 +523,80 @@ function buildSmartReply(messageBody, lang) {
     }
   }
 
-  // 5) Ne tekstil ne ambalaj net değil ama iş odaklı soru
-  if (!hasAnyTextileSignal && !hasAnyPackagingSignal) {
+  // --------------------------------
+  // 5) Ürün sinyali yok ama SEKTÖR bilgisi var
+  // (örnek: "restoranımız var" mesajı)
+// --------------------------------
+  if (!hasAnyTextileSignal && !hasAnyPackagingSignal && session.businessType) {
     if (lang === 'tr') {
+      let sectorText = '';
+      if (session.businessType === 'restaurant') {
+        sectorText =
+          'Restoranlar için hem personel üst giyim hem de baskılı tek kullanımlık ürünler (peçete, kağıt vb.) üretebiliyoruz.\n\n';
+      } else if (session.businessType === 'hotel') {
+        sectorText =
+          'Otel tarafında özellikle personel kıyafeti ve misafir temas noktalarında kullanılan baskılı ürünlerle çalışıyoruz.\n\n';
+      } else if (session.businessType === 'cafe') {
+        sectorText =
+          'Kafeler için hem barista/servis ekibi için üst giyim, hem de baskılı peçete ve ambalaj çözümleri sunuyoruz.\n\n';
+      } else if (session.businessType === 'construction') {
+        sectorText =
+          'İnşaat ve saha ekipleri için yüksek dayanımlı, logolu üst giyim üretiyoruz.\n\n';
+      }
+
       return (
-        'Mesajınız için teşekkürler. Yazdıklarınız oldukça net, birkaç detayı birlikte şekillendirebiliriz.\n\n' +
-        buildProductSummary(lang, 'mixed') +
-        '\n\nKısaca işletmenizin türünü (örneğin otel, restoran, kafe, üretim, inşaat vb.) ve önce tekstil mi yoksa tek kullanımlık/baskılı ambalaj tarafını mı ele almak istediğinizi paylaşırsanız, nokta atışı bir öneriyle devam edebilirim.'
+        sectorText +
+        'Şu an ilk etapta hangi tarafa odaklanmak sizin için daha anlamlı olur?\n' +
+        '• Personel üst giyim (sweatshirt, hoodie, t-shirt vb.)\n' +
+        '• Tek kullanımlık/baskılı ürünler (peçete, kağıt, kutu vb.)\n\n' +
+        'Hangi başlıktan başlayalım yazarsanız, detaylara oradan girelim.'
       );
     } else if (lang === 'de') {
       return (
-        'Vielen Dank für Ihre Nachricht. Was Sie schreiben, ist schon ziemlich klar – ein paar Details können wir gemeinsam konkretisieren.\n\n' +
-        buildProductSummary(lang, 'mixed') +
-        '\n\nWenn Sie mir kurz sagen, was für einen Betrieb Sie haben und ob wir zuerst über Textil oder über Einweg-/Verpackungslösungen sprechen sollen, kann ich Ihnen einen sehr gezielten Vorschlag machen.'
+        'Für Ihren Betrieb können wir sowohl Textil (Mitarbeiteroberbekleidung) als auch bedruckte Einwegprodukte anbieten.\n\n' +
+        'Was ist für Sie im ersten Schritt wichtiger?\n' +
+        '• Mitarbeiterbekleidung (Sweatshirt, Hoodie, T-Shirt etc.)\n' +
+        '• Einweg-/Verpackungsprodukte (Servietten, Papier, Kartons etc.)'
       );
     } else {
       return (
-        'Thank you for your message. What you wrote already gives a good idea; we just need to shape a few details together.\n\n' +
-        buildProductSummary(lang, 'mixed') +
-        '\n\nIf you tell me what type of business you run and whether we should start with textile or with disposable/packaging items, I can share a very focused recommendation.'
+        'For your type of business we can support both textile staffwear and printed disposable items.\n\n' +
+        'Which side would you like to focus on first?\n' +
+        '• Staffwear (sweatshirts, hoodies, t-shirts etc.)\n' +
+        '• Disposable/packaging (napkins, paper, boxes etc.)'
       );
     }
   }
 
-  // Safety fallback (teorik olarak buraya pek düşmez)
+  // --------------------------------
+  // 6) Ne sektör net ne de ürün sinyali güçlü
+  // (kısa, tekrar etmeyen genel cevap)
+// --------------------------------
+  if (!hasAnyTextileSignal && !hasAnyPackagingSignal) {
+    if (lang === 'tr') {
+      return (
+        'Mesajınız için teşekkürler, birkaç detayı birlikte netleştirebiliriz.\n\n' +
+        buildProductSummary(lang, 'mixed') +
+        '\n\nKısaca işletmenizin türünü ve ilk olarak tekstil mi yoksa baskılı tek kullanımlık ürünler mi sizin için daha kritik olduğunu yazarsanız, size en mantıklı yerden başlayabilirim.'
+      );
+    } else if (lang === 'de') {
+      return (
+        'Vielen Dank für Ihre Nachricht. Wir können sowohl Textil- als auch Verpackungslösungen anbieten.\n\n' +
+        buildProductSummary(lang, 'mixed') +
+        '\n\nWenn Sie mir kurz sagen, was für einen Betrieb Sie haben und ob wir mit Textil oder Einwegprodukten starten sollen, kann ich Ihnen einen gezielten Vorschlag machen.'
+      );
+    } else {
+      return (
+        'Thank you for your message. We can help with both textile and printed packaging solutions.\n\n' +
+        buildProductSummary(lang, 'mixed') +
+        "\n\nIf you tell me what type of business you run and whether textile or disposable/packaging items are more urgent, I can start from the most relevant side for you."
+      );
+    }
+  }
+
+  // --------------------------------
+  // 7) Güvenli fallback
+  // --------------------------------
   if (lang === 'tr') {
     return (
       buildProductSummary(lang, 'mixed') +
@@ -565,12 +679,13 @@ function start() {
         try {
           console.log('📩 Yeni mesaj:', {
             from: msg.from,
+            chatId: msg.chatId,
             isGroupMsg: msg.isGroupMsg,
             body: msg.body,
             fromMe: msg.fromMe,
           });
 
-          // Kendi attığımız mesaja tekrar cevap verme
+          // Kendi attığımız mesaja cevap verme
           if (msg.fromMe) {
             return;
           }
@@ -581,11 +696,19 @@ function start() {
             return;
           }
 
-          const lang = detectLanguage(msg.body || '');
-          const replyText = buildSmartReply(msg.body, lang);
+          const sessionId = msg.chatId || msg.from;
+          const session = getSession(sessionId);
 
-          // İnsan gibi hafif gecikmeli cevap
-          const delayMs = 2000 + Math.floor(Math.random() * 4000); // 2–6 saniye
+          // Dil: ilk mesaja göre belirle, sonra sabit kal
+          if (!session.lang) {
+            session.lang = detectLanguage(msg.body || '');
+          }
+          const lang = session.lang;
+
+          const replyText = buildSmartReply(msg.body, lang, session);
+
+          // İnsan gibi hafif gecikmeli cevap (2–6 saniye)
+          const delayMs = 2000 + Math.floor(Math.random() * 4000);
           console.log(`⏳ ${delayMs} ms sonra cevap gönderilecek →`, msg.from);
 
           setTimeout(async () => {
